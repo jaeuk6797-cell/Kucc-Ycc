@@ -149,7 +149,7 @@ def paired_ci(runs: Runs, a: Strategy, b: Strategy, tasks: list[str], k: int,
 
 @dataclass(frozen=True)
 class Config:
-    max_runs: int = 3000       # 탐색 전체 실행 상한
+    max_runs: int = 3000       # 탐색+확인 전체 실행 상한 (Budget을 공유)
     rounds: int = 3
     k0: int = 2                # 첫 라운드 반복 수 (이후 두 배씩)
     keep_frac: float = 0.5     # 라운드마다 남기는 비율
@@ -158,9 +158,9 @@ class Config:
 
 
 def run_search(env: Environment, teacher: Teacher, seeds: list[Strategy],
-               tasks_search: list[str], cfg: Config) -> tuple[list[Strategy], Runs, list[dict]]:
+               tasks_search: list[str], cfg: Config,
+               budget: Budget) -> tuple[list[Strategy], Runs, list[dict]]:
     rng = random.Random(cfg.seed)
-    budget = Budget(cfg.max_runs)
     runs: Runs = {}
     log: list[dict] = []
     pool = list(seeds)
@@ -184,7 +184,11 @@ def run_search(env: Environment, teacher: Teacher, seeds: list[Strategy],
             if r < cfg.rounds - 1:
                 children = teacher.propose(survivors, cfg.children, rng)
                 seen = {s.key() for s in survivors}
-                fresh = [c for c in children if c.key() not in seen]
+                fresh = []
+                for c in children:
+                    if c.key() not in seen:
+                        seen.add(c.key())
+                        fresh.append(c)
                 pool = survivors + fresh
     except BudgetExhausted:
         log.append({"stopped": "budget_exhausted"})
@@ -196,7 +200,7 @@ def confirm(env: Environment, cands: list[Strategy], baseline: Strategy,
             tasks_select: list[str], tasks_test: list[str], k: int, budget: Budget) -> dict:
     """선택 과제로 후보를 고르고, 테스트 과제에서 기준 전략과 짝지어 비교한다."""
     runs: Runs = {}
-    for s in cands + [baseline]:
+    for s in cands:
         ensure_runs(runs, env, s, tasks_select, k, budget)
     stats = {s.sid: summarize(runs, s.sid, tasks_select, k) for s in cands}
     winner = max(cands, key=lambda s: (stats[s.sid].succ, -stats[s.sid].cost))
@@ -287,12 +291,13 @@ def main() -> None:
         Strategy(sid="n3", M=3, N=3),
     ]
 
-    cfg = Config()
+    cfg = Config(max_runs=10000)
+    budget = Budget(cfg.max_runs)   # 탐색과 확인이 같은 예산을 공유
     env, teacher = MockEnv(), RandomEditTeacher()
 
-    survivors, runs, log = run_search(env, teacher, seeds, tasks_search, cfg)
+    survivors, runs, log = run_search(env, teacher, seeds, tasks_search, cfg, budget)
     result = confirm(env, survivors, baseline, tasks_select, tasks_test,
-                     k=8, budget=Budget(cfg.max_runs))
+                     k=8, budget=budget)
 
     out = {"log": log, "result": result}
     Path("search_log.json").write_text(json.dumps(out, ensure_ascii=False, indent=2, default=str))
