@@ -1,0 +1,10 @@
+{"sid": "before", "task": 0, "rep": 0, "success": false, "reward": 0.0, "tokens": 37433, "steps": 20, "expansions": 0}
+{"sid": "before", "task": 1, "rep": 0, "success": true, "reward": 1.0, "tokens": 6389, "steps": 5, "expansions": 0}
+{"sid": "before", "task": 2, "rep": 0, "success": false, "reward": 0.0, "tokens": 38261, "steps": 20, "expansions": 0}
+{"sid": "before", "task": 3, "rep": 0, "success": false, "reward": 0.0, "tokens": 37084, "steps": 20, "expansions": 0}
+{"sid": "before", "task": 4, "rep": 0, "success": false, "reward": 0.0, "tokens": 37158, "steps": 20, "expansions": 0}
+{"sid": "before", "task": 5, "rep": 0, "success": false, "reward": 0.0, "tokens": 37320, "steps": 20, "expansions": 0}
+{"sid": "before", "task": 6, "rep": 0, "success": true, "reward": 1.0, "tokens": 21149, "steps": 13, "expansions": 0}
+{"sid": "before", "task": 7, "rep": 0, "success": false, "reward": 0.0, "tokens": 38390, "steps": 20, "expansions": 0}
+{"sid": "before", "task": 8, "rep": 0, "success": false, "reward": 0.0, "tokens": 40700, "steps": 20, "expansions": 0}
+{"sid": "before", "task": 9, "rep": 0, "success": false, "reward": 0.57, "tokens": 10207, "steps": 6, "expansions": 0}

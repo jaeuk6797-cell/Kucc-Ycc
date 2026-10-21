@@ -61,6 +61,44 @@ class OpenAICompatLLM:
         return Reply(text, tokens)
 
 
+class AnthropicLLM:
+    """Claude API에 공식 SDK로 요청한다.  ANTHROPIC_API_KEY 환경변수를 읽는다.
+
+    현재 Claude 모델은 temperature를 기본값 외로 바꾸면 400을 내므로 temperature는 보내지 않는다.
+    같은 과제를 반복할 때의 다양성은 모델 자체의 비결정성에서 나온다.
+    생각(thinking)은 끌 수 없으므로 effort로 깊이와 비용을 조절한다.
+    """
+
+    # 거절(refusal) 시 서버가 다른 모델로 다시 실행하는 기능을 지원하는 모델
+    FALLBACK_MODELS = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5", "claude-fable-5-1"}
+
+    def __init__(self, model: str = "claude-opus-5-5", effort: str = "low", max_tokens: int = 16000):
+        import anthropic   # 실제 실행할 때만 필요하므로 여기서 불러온다
+
+        self.client = anthropic.Anthropic()
+        self.model = model
+        self.effort = effort
+        self.max_tokens = max_tokens   # 생각 토큰도 여기에 포함되므로 넉넉하게
+
+    def chat(self, role: str, system: str, user: str, temperature: float = 0.0) -> Reply:
+        kwargs = dict(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_config={"effort": self.effort},
+        )
+        if self.model in self.FALLBACK_MODELS:
+            r = self.client.beta.messages.create(
+                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
+        else:
+            r = self.client.messages.create(**kwargs)
+
+        text = "" if r.stop_reason == "refusal" else \
+            "".join(b.text for b in r.content if b.type == "text")
+        return Reply(text, r.usage.input_tokens + r.usage.output_tokens)
+
+
 # ---------------------------------------------------------------- 가짜 LLM (테스트용)
 
 class ScriptedLLM:

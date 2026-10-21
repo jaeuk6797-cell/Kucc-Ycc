@@ -3,7 +3,8 @@
 한 에피소드의 흐름
   1) 계획 모델이 레벨 1부터 start_level까지 계층 계획을 만든다 (AdaPlan-H 형식: 위 레벨일수록 개괄적).
   2) 실행 모델이 계획을 보며 행동을 고른다.
-  3) 무효 행동이나 화면 변화 없는 행동이 trigger_n번 연속되면 '막힘'으로 보고 계획을 확장한다.
+  3) 최근 2*trigger_n 스텝 중 막힘 신호(무효 행동, 또는 이미 본 화면으로 돌아온 행동)가
+     trigger_n번 이상이면 '막힘'으로 보고 계획을 확장한다.
        - global : 다음 레벨을 하나 더 만든다 (앞 레벨들을 조건으로, 논문 식 p_i = f(u, p_{i-1}, ..., p_1))
        - local  : 지금 막힌 단계 하나만 하위 단계로 나눈다 (ADaPT 방식)
        - hybrid : 레벨을 max_level까지 늘린 뒤에는 local로 전환
@@ -27,7 +28,7 @@ class Strategy:
     sid: str
     start_level: int = 1          # 처음에 만들 계획 레벨 수
     max_level: int = 3            # global 확장으로 늘릴 수 있는 최대 레벨 (논문 M=3)
-    trigger_n: int = 3            # 막힘이 몇 번 연속되면 확장할지 (0이면 확장 안 함 = 기준 전략)
+    trigger_n: int = 3            # 최근 2n 스텝 중 막힘 신호가 n번이면 확장 (0이면 확장 안 함 = 기준 전략)
     max_expand: int = 4           # 에피소드당 최대 확장 횟수
     scope: str = "hybrid"         # global / local / hybrid
     rules: tuple[str, ...] = ()   # 계획 프롬프트에 붙일 규칙 (교사가 추가/삭제)
@@ -66,23 +67,36 @@ class Plan:
 
 # ---------------------------------------------------------------- 프롬프트
 
+# 계획 모델이 없는 기능(필터, 장바구니 등)을 계획하지 않도록 사이트 구조를 알려 준다
+SITE_GUIDE = (
+    "The website has only three kinds of pages. "
+    "(1) Search page: type a query with search[...]. "
+    "(2) Results page: a list of products with their ids, names and prices; 'next >' and "
+    "'< prev' change pages, 'back to search' returns to the search page. "
+    "(3) Product page: option buttons (such as size or color), 'description', 'features', "
+    "'reviews', '< prev', and 'buy now'. "
+    "There are no filters and no cart. To finish, open a matching product, click each required "
+    "option, then click 'buy now'. Buying ends the task, so buy the best match you have found "
+    "rather than searching forever."
+)
+
 PLAN_SYSTEM = (
     "You are a planner for a web shopping agent. Plans are hierarchical: plan 1 is a coarse "
     "outline, and each next level refines the previous one with more concrete conditions and "
-    "details while keeping the same overall goal. Write only numbered lines in the form "
-    "'Step k: ...'."
+    "details while keeping the same overall goal. " + SITE_GUIDE + " Write only numbered lines "
+    "in the form 'Step k: ...'."
 )
 
 REFINE_SYSTEM = (
     "You are a planner for a web shopping agent. The agent got stuck on one step of its plan. "
     "Break that single step into 2-4 smaller concrete sub-steps based on the current page. "
-    "Write only numbered lines in the form 'Step k: ...'."
+    + SITE_GUIDE + " Write only numbered lines in the form 'Step k: ...'."
 )
 
 ACT_SYSTEM = (
     "You are a web shopping agent. Follow the plan. Choose exactly one action.\n"
     "Valid actions: search[<query>] when the search bar is available, or click[<button>] "
-    "where <button> is one of the clickables.\n"
+    "where <button> is one of the clickables.\n" + SITE_GUIDE + "\n"
     "Answer in exactly two lines:\nStep: <number of the step you are working on in the most "
     "detailed plan>\nAction: <action>"
 )
@@ -148,6 +162,7 @@ class RunConfig:
     success_threshold: float = 1.0    # 보상이 이 값 이상이면 성공
     act_temperature: float = 0.0      # 같은 과제를 여러 번 돌릴 거면 0보다 크게
     history_len: int = 6              # 행동 프롬프트에 넣을 최근 기록 수
+    obs_chars: int = 4000             # 현재 화면을 이 길이까지 보여 줌 (결과 페이지는 최대 약 2200자)
 
 
 def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Trial:
@@ -159,14 +174,16 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
         tokens += make_level(llm, instruction, plan, s.rules)
 
     history: list[tuple[str, str]] = []
-    steps = expansions = stuck = 0
+    marks: list[bool] = []        # 스텝마다 막힘 신호가 있었는지 (확장하면 비운다)
+    seen = {obs}                  # 이번 에피소드에서 이미 본 화면
+    steps = expansions = 0
     reward, done = 0.0, False
 
     while steps < cfg.max_steps and not done:
         avail = env.available()
         recent = "\n".join(f"> {a}\n{o}" for a, o in history[-cfg.history_len:]) or "(none)"
         user = (f"# Instruction\n{instruction}\n# Plan\n{plan.render()}\n"
-                f"# Recent history\n{recent}\n# Current observation\n{_short(obs, 1500)}\n"
+                f"# Recent history\n{recent}\n# Current observation\n{_short(obs, cfg.obs_chars)}\n"
                 f"# Available actions\nSearch bar: {'yes' if avail.get('has_search_bar') else 'no'}\n"
                 f"Clickables: {' | '.join(avail.get('clickables', []))}")
         r = llm.chat("act", ACT_SYSTEM, user, temperature=cfg.act_temperature)
@@ -174,17 +191,20 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
         steps += 1
         step_no, action = parse_action(r.text)
 
-        # -- 막힘 판정: 무효 행동, 또는 화면이 바뀌지 않은 행동
+        # -- 막힘 신호: 무효 행동, 또는 이미 본 화면으로 돌아온 행동
+        #    (화면이 안 바뀐 경우도 포함. 검색→상품→검색으로 맴도는 반복도 잡는다)
         if action is None or not is_valid(action, avail):
-            stuck += 1
+            marks.append(True)
             history.append((action or r.text.strip()[:60], "Invalid action."))
         else:
             new_obs, reward, done = env.step(action)
-            stuck = stuck + 1 if new_obs == obs else 0
+            marks.append(new_obs in seen)
+            seen.add(new_obs)
             history.append((action, _short(new_obs)))
             obs = new_obs
 
-        # -- 확장
+        # -- 확장: 최근 2*trigger_n 스텝 중 막힘 신호가 trigger_n번 이상이면
+        stuck = sum(marks[-2 * s.trigger_n:]) if s.trigger_n else 0
         if (not done and s.trigger_n and stuck >= s.trigger_n and expansions < s.max_expand):
             note = f"The agent is stuck on step {step_no}. Last actions:\n" + \
                    "\n".join(f"> {a} -> {o[:80]}" for a, o in history[-s.trigger_n:])
@@ -196,7 +216,7 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
             else:
                 continue          # global인데 이미 최대 레벨: 더 확장할 수 없음
             expansions += 1
-            stuck = 0
+            marks.clear()
 
     return Trial(success=reward >= cfg.success_threshold, reward=reward, tokens=tokens,
                  steps=steps, expansions=expansions, seconds=round(time.time() - t0, 3))

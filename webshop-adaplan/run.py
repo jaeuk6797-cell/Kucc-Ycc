@@ -37,12 +37,19 @@ def build(args):
         teacher_llm = None
     else:
         from envs import WebShopEnv
-        from llm import OpenAICompatLLM
         env = WebShopEnv(num_products=args.num_products)
-        llm = OpenAICompatLLM(args.model, base_url=args.base_url)
+        if args.provider == "anthropic":
+            from llm import AnthropicLLM
+            llm = AnthropicLLM(args.model or "claude-opus-5-5", effort=args.effort)
+            teacher_llm = AnthropicLLM(args.teacher_model, effort=args.teacher_effort) \
+                if args.teacher_model else None
+        else:
+            from llm import OpenAICompatLLM
+            llm = OpenAICompatLLM(args.model or "meta-llama/Llama-3.1-8B-Instruct",
+                                  base_url=args.base_url)
+            teacher_llm = OpenAICompatLLM(args.teacher_model, base_url=args.teacher_base_url) \
+                if args.teacher_model else None
         factory = lambda seed: llm          # noqa: E731  실제 LLM은 하나를 계속 재사용
-        teacher_llm = OpenAICompatLLM(args.teacher_model, base_url=args.teacher_base_url) \
-            if args.teacher_model else None
     cfg = RunConfig(max_steps=args.max_steps, success_threshold=args.success_threshold,
                     act_temperature=args.temperature)
     return env, factory, teacher_llm, cfg
@@ -52,7 +59,14 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["episode", "difficulty", "search"])
     ap.add_argument("--mock", action="store_true")
-    ap.add_argument("--model", default="meta-llama/Llama-3.1-8B-Instruct")
+    ap.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic",
+                    help="anthropic: Claude API / openai: vLLM 등 OpenAI 형식 서버")
+    ap.add_argument("--model", default=None,
+                    help="비우면 anthropic=claude-opus-5-5, openai=Llama-3.1-8B-Instruct")
+    ap.add_argument("--effort", default="low", choices=["low", "medium", "high", "xhigh", "max"],
+                    help="Claude 생각 깊이 (에이전트 행동용)")
+    ap.add_argument("--teacher-effort", default="high",
+                    choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--teacher-model", default=None, help="비우면 무작위 편집 교사 사용")
     ap.add_argument("--teacher-base-url", default=None)
