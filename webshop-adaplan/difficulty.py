@@ -35,8 +35,9 @@ def assign_tiers(runner, tasks: list[int], k: int, ref: Strategy = REFERENCE,
                  out_csv: str | None = None) -> dict[int, int]:
     tiers: dict[int, int] = {}
     rows = []
-    for t in tasks:
-        trials = [runner.run(ref, t, rep) for rep in range(k)]
+    all_trials = runner.run_many([(ref, t, rep) for t in tasks for rep in range(k)])
+    for i, t in enumerate(tasks):
+        trials = all_trials[i * k:(i + 1) * k]
         tiers[t] = tier_of(trials)
         rows.append({
             "task": t, "tier": tiers[t],

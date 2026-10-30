@@ -22,16 +22,73 @@ from llm import LLM
 # ---------------------------------------------------------------- 실행기
 
 class TaskRunner:
-    """(전략, 과제, 반복 번호) 하나를 실행한다. 과제 = WebShop 세션 번호."""
+    """(전략, 과제, 반복 번호) 하나를 실행한다. 과제 = WebShop 세션 번호.
 
-    def __init__(self, env, llm_factory, cfg: RunConfig):
+    workers > 1 이면 run_many가 프로세스 여러 개로 나눠 돌린다. 각 프로세스는 build()로
+    자기 환경과 LLM을 따로 만든다 (WebShop 환경과 Java 검색 엔진은 스레드끼리 공유하기 어려움).
+    """
+
+    def __init__(self, env, llm_factory, cfg: RunConfig, workers: int = 1, build=None):
         self.env = env
         self.llm_factory = llm_factory      # seed -> LLM (가짜 LLM은 seed로 재현성 확보)
         self.cfg = cfg
+        self.workers = workers
+        self.build = build                  # () -> (env, llm_factory, cfg), 피클 가능해야 함
+        self._pool = None
 
     def run(self, s: Strategy, task: int, rep: int) -> Trial:
         seed = int(hashlib.md5(f"{s.key()}|{task}|{rep}".encode()).hexdigest()[:8], 16)
         return run_episode(self.env, self.llm_factory(seed), s, task, self.cfg)
+
+    def run_many(self, jobs: list[tuple[Strategy, int, int]], on_done=None) -> list[Trial]:
+        """여러 (전략, 과제, 반복)을 실행해 같은 순서로 결과를 돌려준다.
+        on_done(job, trial)은 에피소드 하나가 끝날 때마다 (끝난 순서대로) 불린다."""
+        results: list[Trial | None] = [None] * len(jobs)
+        if not jobs:
+            return []
+        if self.workers <= 1 or self.build is None:
+            for i, j in enumerate(jobs):
+                results[i] = self.run(*j)
+                if on_done:
+                    on_done(j, results[i])
+            return results
+        from concurrent.futures import as_completed
+        if self._pool is None:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            self._pool = ProcessPoolExecutor(self.workers, mp_context=multiprocessing.get_context("spawn"),
+                                             initializer=_init_worker, initargs=(self.build,))
+        futures = {self._pool.submit(_worker_run, j): i for i, j in enumerate(jobs)}
+        for fut in as_completed(futures):
+            i = futures[fut]
+            results[i] = fut.result()
+            if on_done:
+                on_done(jobs[i], results[i])
+        return results
+
+
+_WORKER: TaskRunner | None = None
+
+
+def _init_worker(build) -> None:
+    global _WORKER
+    env, factory, cfg = build()
+    _WORKER = TaskRunner(env, factory, cfg)
+
+
+def _worker_run(job, attempts: int = 3) -> Trial:
+    """에피소드 하나를 실행. API 오류 등으로 실패하면 잠시 쉬었다가 처음부터 다시 실행한다.
+    끝내 실패하면 프로세스 사이에서 전달 가능한 RuntimeError로 바꿔 올린다
+    (SDK 오류 객체는 피클이 안 돼서 그대로 올리면 프로세스 풀 전체가 깨진다)."""
+    import time
+    for i in range(attempts):
+        try:
+            return _WORKER.run(*job)
+        except Exception as e:  # noqa: BLE001
+            if i == attempts - 1:
+                s, task, rep = job
+                raise RuntimeError(f"{s.sid} task={task} rep={rep}: {type(e).__name__}: {e}") from None
+            time.sleep(30 * (i + 1))
 
 
 # ---------------------------------------------------------------- 예산, 통계, 선택
@@ -62,16 +119,56 @@ class Stat:
 Runs = dict[str, dict[tuple[int, int], Trial]]
 
 
-def ensure_runs(runs: Runs, runner: TaskRunner, s: Strategy, tasks: list[int], k: int,
+def ensure_runs(runs: Runs, runner: TaskRunner, strategies, tasks: list[int], k: int,
                 budget: Budget, log_fn=None) -> None:
-    bucket = runs.setdefault(s.sid, {})
-    for t in tasks:
-        for rep in range(k):
-            if (t, rep) not in bucket:
-                budget.spend()
-                bucket[(t, rep)] = trial = runner.run(s, t, rep)
-                if log_fn:
-                    log_fn({"sid": s.sid, "task": t, "rep": rep, **asdict(trial)})
+    """없는 (과제, 반복)만 실행한다. 전략 여러 개를 한 번에 넘기면 모든 작업을 한 줄로 세워
+    프로세스가 쉬는 시간을 줄인다. 예산이 모자라면 할 수 있는 만큼 실행한 뒤 BudgetExhausted."""
+    if isinstance(strategies, Strategy):
+        strategies = [strategies]
+    jobs, exhausted = [], False
+    for s in strategies:
+        bucket = runs.setdefault(s.sid, {})
+        for t in tasks:
+            for rep in range(k):
+                if (t, rep) not in bucket:
+                    try:
+                        budget.spend()
+                    except BudgetExhausted:
+                        exhausted = True
+                        break
+                    jobs.append((s, t, rep))
+            if exhausted:
+                break
+        if exhausted:
+            break
+
+    def done(job, trial):          # 에피소드가 끝나는 즉시 저장과 기록
+        s, t, rep = job
+        runs[s.sid][(t, rep)] = trial
+        if log_fn:
+            log_fn({"sid": s.sid, "task": t, "rep": rep, **asdict(trial)})
+
+    runner.run_many(jobs, on_done=done)
+    if exhausted:
+        raise BudgetExhausted
+
+
+def load_runs(path: str) -> Runs:
+    """이전 실행 기록(jsonl)을 불러온다. --resume 으로 이어서 돌릴 때 쓴다."""
+    runs: Runs = {}
+    fields = set(Trial.__dataclass_fields__)
+    with open(path, encoding="utf-8-sig") as f:      # 편집기가 붙인 BOM이 있어도 읽음
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                runs.setdefault(r["sid"], {})[(r["task"], r["rep"])] = Trial(**{k: r[k] for k in fields})
+    return runs
+
+
+def restrict(runs: Runs, tasks: list[int]) -> Runs:
+    """주어진 과제의 기록만 남긴 복사본."""
+    ts = set(tasks)
+    return {sid: {key: tr for key, tr in b.items() if key[0] in ts} for sid, b in runs.items()}
 
 
 def summarize(runs: Runs, sid: str, tasks: list[int], k: int) -> Stat:
@@ -231,17 +328,18 @@ class SearchConfig:
     seed: int = 0
 
 
-def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None):
+def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None, cache: Runs | None = None):
+    """cache: 이전 실행 기록 (이어서 돌릴 때). 이미 있는 실행은 다시 하지 않고, 예산에서 미리 뺀다."""
     rng = random.Random(cfg.seed)
     budget = Budget(cfg.max_runs)
-    runs: Runs = {}
+    runs: Runs = restrict(cache, tasks) if cache else {}
+    budget.left -= sum(len(b) for b in runs.values())
     log: list[dict] = []
     pool, survivors = list(seeds), list(seeds)
     try:
         for r in range(cfg.rounds):
             k = cfg.k0 * 2**r
-            for s in pool:
-                ensure_runs(runs, runner, s, tasks, k, budget, log_fn)
+            ensure_runs(runs, runner, pool, tasks, k, budget, log_fn)    # 라운드의 전략 전체를 한 번에
             stats = {s.sid: summarize(runs, s.sid, tasks, k) for s in pool}
             survivors = select_survivors(pool, stats, max(2, int(len(pool) * cfg.keep_frac)),
                                          cfg.min_succ)
@@ -249,7 +347,7 @@ def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None):
                         "front": pareto_front(stats),
                         "stats": {sid: asdict(st) for sid, st in stats.items()}})
             print(f"[round {r}] k={k} pool={len(pool)} budget_left={budget.left} "
-                  f"top={[(s.sid, round(stats[s.sid].succ, 3)) for s in survivors[:3]]}")
+                  f"top={[(s.sid, round(stats[s.sid].succ, 3)) for s in survivors[:3]]}", flush=True)
             if r < cfg.rounds - 1:
                 children = teacher.propose(survivors, cfg.children, rng, stats)
                 seen = {s.key() for s in pool}
@@ -257,20 +355,22 @@ def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None):
                 pool = survivors + fresh
     except BudgetExhausted:
         log.append({"stopped": "budget_exhausted"})
-        print("[search] 예산 소진으로 중단")
+        print("[search] 예산 소진으로 중단", flush=True)
     return survivors, runs, log
 
 
-def confirm(runner, cands, baseline, tasks_select, tasks_test, k, budget, log_fn=None) -> dict:
-    runs: Runs = {}
-    for s in cands + [baseline]:
-        ensure_runs(runs, runner, s, tasks_select, k, budget, log_fn)
+def confirm(runner, cands, baseline, tasks_select, tasks_test, k, budget, log_fn=None,
+            cache: Runs | None = None) -> dict:
+    """선택 과제로 후보 중 승자를 고르고, 테스트 과제에서 기준 전략과 짝지어 비교한다.
+    기준 전략은 선택 과제에서 쓰이지 않으므로 돌리지 않는다."""
+    runs: Runs = restrict(cache, tasks_select) if cache else {}
+    ensure_runs(runs, runner, cands, tasks_select, k, budget, log_fn)
     stats = {s.sid: summarize(runs, s.sid, tasks_select, k) for s in cands}
     winner = max(cands, key=lambda s: (stats[s.sid].succ, -stats[s.sid].cost))
+    print(f"[confirm] 선택 과제 승자: {winner.sid} succ={stats[winner.sid].succ:.3f}", flush=True)
 
-    test: Runs = {}
-    for s in (winner, baseline):
-        ensure_runs(test, runner, s, tasks_test, k, budget, log_fn)
+    test: Runs = restrict(cache, tasks_test) if cache else {}
+    ensure_runs(test, runner, [winner, baseline], tasks_test, k, budget, log_fn)
     lo, hi = paired_ci(test, winner, baseline, tasks_test, k)
     return {
         "winner": asdict(winner),

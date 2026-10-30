@@ -4,6 +4,9 @@
   python run.py difficulty --tasks 1500:1600 --k 3    # 5단계 난이도 표 만들기
   python run.py search     --search 1500:1560 --select 1560:1590 --test 0:50
                                                       # 전략 탐색 + 기준 전략과 비교
+  python run.py eval       --tasks 0:20 --k 3 --label after --trials-out after.jsonl
+                                                      # 한 전략을 과제×반복으로 실행해 jsonl로 저장
+                                                      # (report.py 로 바로 표·그래프)
 
 --mock 을 붙이면 가짜 쇼핑몰 + 가짜 LLM으로 돈다 (설치 없이 코드 흐름 확인용).
 실제 실행 예:
@@ -15,12 +18,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict
+from functools import partial
 
 from agent import RunConfig, Strategy, run_episode
 from difficulty import assign_tiers, spearman
 from search import (Budget, LLMTeacher, RandomEditTeacher, SearchConfig, TaskRunner, confirm,
-                    run_search)
+                    load_runs, run_search)
 
 
 def task_range(text: str) -> list[int]:
@@ -28,7 +33,8 @@ def task_range(text: str) -> list[int]:
     return list(range(int(a), int(b)))
 
 
-def build(args):
+def build(args, need_env: bool = True):
+    """need_env=False: 병렬 실행의 부모 프로세스용. 환경은 각 작업 프로세스가 만든다."""
     if args.mock:
         from envs import FakeShop
         from llm import ScriptedLLM
@@ -37,7 +43,7 @@ def build(args):
         teacher_llm = None
     else:
         from envs import WebShopEnv
-        env = WebShopEnv(num_products=args.num_products)
+        env = WebShopEnv(num_products=args.num_products) if need_env else None
         if args.provider == "anthropic":
             from llm import AnthropicLLM
             llm = AnthropicLLM(args.model or "claude-opus-5-5", effort=args.effort)
@@ -55,9 +61,15 @@ def build(args):
     return env, factory, teacher_llm, cfg
 
 
+def build_worker(args):
+    """병렬 실행용 프로세스가 자기 환경과 LLM을 만들 때 쓴다 (교사는 필요 없음)."""
+    env, factory, _, cfg = build(args)
+    return env, factory, cfg
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["episode", "difficulty", "search"])
+    ap.add_argument("cmd", choices=["episode", "difficulty", "search", "eval"])
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic",
                     help="anthropic: Claude API / openai: vLLM 등 OpenAI 형식 서버")
@@ -74,27 +86,58 @@ def main() -> None:
     ap.add_argument("--max-steps", type=int, default=20)
     ap.add_argument("--success-threshold", type=float, default=1.0)
     ap.add_argument("--temperature", type=float, default=0.7)
+    ap.add_argument("--workers", type=int, default=1,
+                    help="동시에 돌릴 에피소드 수 (프로세스 하나당 메모리 약 650MB)")
     # episode
     ap.add_argument("--session", type=int, default=1500)
     # difficulty
     ap.add_argument("--tasks", default="1500:1600")
     ap.add_argument("--k", type=int, default=3)
     ap.add_argument("--out", default="tiers.csv")
+    # eval
+    ap.add_argument("--label", default="demo", help="eval 결과의 sid 칸에 쓸 이름")
+    ap.add_argument("--trials-out", default=None,
+                    help="실행 기록 jsonl (기본: eval=eval_trials.jsonl, search=trials.jsonl)")
     # search
     ap.add_argument("--search", default="1500:1560")
     ap.add_argument("--select", default="1560:1590")
     ap.add_argument("--test", default="0:50")
-    ap.add_argument("--max-runs", type=int, default=3000)
+    ap.add_argument("--max-runs", type=int, default=3000, help="탐색 실행 상한 (확인 단계는 별도로 같은 상한)")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--confirm-k", type=int, default=2)
+    ap.add_argument("--seed", type=int, default=0, help="탐색 시드 (교사 편집의 무작위성)")
+    ap.add_argument("--search-log", default="search_log.json")
+    ap.add_argument("--resume", action="store_true",
+                    help="search/eval: --trials-out 의 기존 기록을 불러와 이미 한 실행은 건너뛰고 이어서 기록")
     args = ap.parse_args()
 
-    env, factory, teacher_llm, cfg = build(args)
-    runner = TaskRunner(env, factory, cfg)
+    parallel = args.workers > 1 and args.cmd != "episode"
+    env, factory, teacher_llm, cfg = build(args, need_env=not parallel)
+    runner = TaskRunner(env, factory, cfg, workers=args.workers if parallel else 1,
+                        build=partial(build_worker, args))
 
     if args.cmd == "episode":
         s = Strategy(sid="demo")
         print(json.dumps(asdict(run_episode(env, factory(0), s, args.session, cfg)), indent=2))
+
+    elif args.cmd == "eval":
+        # 기본 전략 하나를 과제×반복으로 실행. 끝나는 즉시 한 줄씩 써서 중간에 멈춰도 결과가 남는다.
+        s = Strategy(sid=args.label)
+        out = args.trials_out or "eval_trials.jsonl"
+        done_before = load_runs(out).get(args.label, {}) if args.resume and os.path.exists(out) else {}
+        jobs = [(s, t, rep) for t in task_range(args.tasks) for rep in range(args.k)
+                if (t, rep) not in done_before]
+        print(f"[eval {args.label}] 실행할 에피소드 {len(jobs)}개 (이미 있음 {len(done_before)}개)", flush=True)
+        with open(out, "a" if args.resume else "w", encoding="utf-8") as f:
+            def write(job, trial):
+                _, t, rep = job
+                f.write(json.dumps({"sid": args.label, "task": t, "rep": rep, **asdict(trial)}) + "\n")
+                f.flush()
+                print(f"[eval {args.label}] task {t} rep {rep}: success={trial.success} "
+                      f"reward={trial.reward:.2f} steps={trial.steps} expand={trial.expansions} "
+                      f"tokens={trial.tokens}", flush=True)
+            runner.run_many(jobs, on_done=write)
+        print(f"[eval] 저장: {out}")
 
     elif args.cmd == "difficulty":
         tasks = task_range(args.tasks)
@@ -113,15 +156,24 @@ def main() -> None:
             Strategy(sid="L1_global", start_level=1, trigger_n=2, scope="global"),
         ]
         teacher = LLMTeacher(teacher_llm) if teacher_llm else RandomEditTeacher()
-        log_file = open("trials.jsonl", "w", encoding="utf-8")
-        log_fn = lambda row: log_file.write(json.dumps(row) + "\n")   # noqa: E731
+        out = args.trials_out or "trials.jsonl"
+        cache = load_runs(out) if args.resume and os.path.exists(out) else None
+        if cache:
+            print(f"[search] 이전 기록 {sum(len(b) for b in cache.values())}개를 불러와 이어서 실행", flush=True)
+        log_file = open(out, "a" if args.resume else "w", encoding="utf-8")
 
-        scfg = SearchConfig(max_runs=args.max_runs, rounds=args.rounds)
-        survivors, _, log = run_search(runner, teacher, seeds, task_range(args.search), scfg, log_fn)
+        def log_fn(row):
+            log_file.write(json.dumps(row) + "\n")
+            log_file.flush()
+
+        scfg = SearchConfig(max_runs=args.max_runs, rounds=args.rounds, seed=args.seed)
+        survivors, _, log = run_search(runner, teacher, seeds, task_range(args.search), scfg, log_fn,
+                                       cache=cache)
         result = confirm(runner, survivors, baseline, task_range(args.select),
-                         task_range(args.test), args.confirm_k, Budget(args.max_runs), log_fn)
+                         task_range(args.test), args.confirm_k, Budget(args.max_runs), log_fn,
+                         cache=cache)
         log_file.close()
-        with open("search_log.json", "w", encoding="utf-8") as f:
+        with open(args.search_log, "w", encoding="utf-8") as f:
             json.dump({"log": log, "result": result}, f, ensure_ascii=False, indent=2, default=str)
         print(json.dumps(result, indent=2, default=str))
 

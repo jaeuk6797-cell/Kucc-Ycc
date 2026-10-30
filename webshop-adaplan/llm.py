@@ -75,7 +75,9 @@ class AnthropicLLM:
     def __init__(self, model: str = "claude-opus-5-5", effort: str = "low", max_tokens: int = 16000):
         import anthropic   # 실제 실행할 때만 필요하므로 여기서 불러온다
 
-        self.client = anthropic.Anthropic()
+        # 병렬 실행 시 속도 제한(429)·과부하(529)가 잦으므로 재시도를 넉넉히 (지수 백오프는 SDK가 처리)
+        # 응답 대기는 2분까지 (기본 10분이면 응답 없는 요청 하나에 오래 묶임)
+        self.client = anthropic.Anthropic(max_retries=10, timeout=120.0)
         self.model = model
         self.effort = effort
         self.max_tokens = max_tokens   # 생각 토큰도 여기에 포함되므로 넉넉하게

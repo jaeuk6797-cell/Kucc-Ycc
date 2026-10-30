@@ -77,8 +77,12 @@ SITE_GUIDE = (
     "'reviews', '< prev', and 'buy now'. "
     "There are no filters and no cart. To finish, open a matching product, click each required "
     "option, then click 'buy now'. Buying ends the task, so buy the best match you have found "
-    "rather than searching forever."
+    "rather than searching forever. The page text does not change when you click an option; "
+    "the options you have already selected are listed separately, so click each option once."
 )
+
+# 상품 페이지에서 옵션이 아닌 버튼
+NAV_BUTTONS = {"back to search", "< prev", "next >", "description", "features", "reviews", "buy now"}
 
 PLAN_SYSTEM = (
     "You are a planner for a web shopping agent. Plans are hierarchical: plan 1 is a coarse "
@@ -176,6 +180,7 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
     history: list[tuple[str, str]] = []
     marks: list[bool] = []        # 스텝마다 막힘 신호가 있었는지 (확장하면 비운다)
     seen = {obs}                  # 이번 에피소드에서 이미 본 화면
+    selected: list[str] = []      # 지금 상품에서 고른 옵션 (WebShop 화면에는 표시되지 않음)
     steps = expansions = 0
     reward, done = 0.0, False
 
@@ -184,6 +189,7 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
         recent = "\n".join(f"> {a}\n{o}" for a, o in history[-cfg.history_len:]) or "(none)"
         user = (f"# Instruction\n{instruction}\n# Plan\n{plan.render()}\n"
                 f"# Recent history\n{recent}\n# Current observation\n{_short(obs, cfg.obs_chars)}\n"
+                f"# Options selected on this product\n{', '.join(selected) or '(none)'}\n"
                 f"# Available actions\nSearch bar: {'yes' if avail.get('has_search_bar') else 'no'}\n"
                 f"Clickables: {' | '.join(avail.get('clickables', []))}")
         r = llm.chat("act", ACT_SYSTEM, user, temperature=cfg.act_temperature)
@@ -197,8 +203,19 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
             marks.append(True)
             history.append((action or r.text.strip()[:60], "Invalid action."))
         else:
+            target = action.strip().lower()[6:-1] if action.lower().startswith("click[") else ""
+            on_item = "buy now" in [c.lower() for c in avail.get("clickables", [])]
+            is_option = on_item and target and target not in NAV_BUTTONS
             new_obs, reward, done = env.step(action)
-            marks.append(new_obs in seen)
+            if is_option:
+                # 옵션 클릭은 화면이 안 바뀐다. 새 옵션이면 진전, 이미 고른 옵션을 또 누르면 막힘 신호
+                marks.append(target in selected)
+                if target not in selected:
+                    selected.append(target)
+            else:
+                marks.append(new_obs in seen)
+                if target == "back to search" or (target and not on_item and target not in NAV_BUTTONS):
+                    selected.clear()      # 다른 상품을 열거나 검색으로 돌아가면 선택이 초기화됨
             seen.add(new_obs)
             history.append((action, _short(new_obs)))
             obs = new_obs
