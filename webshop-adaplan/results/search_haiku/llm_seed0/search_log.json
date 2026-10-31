@@ -1,0 +1,77 @@
+{
+  "log": [
+    {
+      "round": 0,
+      "k": 1,
+      "pool": 4,
+      "budget_left": 130,
+      "front": [
+        "L1_hybrid",
+        "L1_global"
+      ],
+      "stats": {
+        "baseline": {
+          "succ": 0.36666666666666664,
+          "cost": 30461.0,
+          "steps": 8.0,
+          "expand": 0.0,
+          "n": 30
+        },
+        "L1_hybrid": {
+          "succ": 0.4,
+          "cost": 14457.416666666666,
+          "steps": 6.666666666666667,
+          "expand": 1.2,
+          "n": 30
+        },
+        "L2_local": {
+          "succ": 0.26666666666666666,
+          "cost": 18368.25,
+          "steps": 6.375,
+          "expand": 1.5,
+          "n": 30
+        },
+        "L1_global": {
+          "succ": 0.36666666666666664,
+          "cost": 13824.363636363636,
+          "steps": 6.454545454545454,
+          "expand": 1.2,
+          "n": 30
+        }
+      }
+    },
+    {
+      "stopped": "budget_exhausted"
+    }
+  ],
+  "result": {
+    "winner": {
+      "sid": "L1_hybrid",
+      "start_level": 1,
+      "max_level": 3,
+      "trigger_n": 3,
+      "max_expand": 4,
+      "scope": "hybrid",
+      "rules": []
+    },
+    "test_winner": {
+      "succ": 0.425,
+      "cost": 21038.264705882353,
+      "steps": 8.529411764705882,
+      "expand": 1.4875,
+      "n": 80
+    },
+    "test_baseline": {
+      "succ": 0.375,
+      "cost": 29054.666666666668,
+      "steps": 7.733333333333333,
+      "expand": 0.0,
+      "n": 80
+    },
+    "diff_ci95": [
+      -0.013,
+      0.125
+    ],
+    "beats_baseline": false
+  }
+}
