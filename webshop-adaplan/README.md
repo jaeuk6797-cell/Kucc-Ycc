@@ -43,6 +43,25 @@ python run.py search --search 1500:1560 --select 1560:1590 --test 0:50
 Claude 모델은 temperature를 바꿀 수 없어 `--temperature`가 무시됩니다. 생각 깊이는 `--effort`(에이전트)와
 `--teacher-effort`(교사)로 조절합니다.
 
+## ALFWorld
+
+같은 계층 계획 + 확장 + 전략 탐색 틀을 ALFWorld(가정 환경)에도 쓴다. `--env alfworld` 로 고른다.
+
+```bash
+# 설치 (WSL, WebShop과 분리된 Python 3.10 venv)
+python3.10 -m venv ~/alf_venv && . ~/alf_venv/bin/activate
+pip install alfworld anthropic openai matplotlib pyyaml
+export ALFWORLD_DATA=$HOME/alfworld_data && alfworld-download -f
+# 실행 (실제 API 호출, 비용 발생)
+bash alfworld_search.sh 3 0        # workers, seed
+```
+
+- 분할 `--alf-split`: valid_unseen 134개(기본), valid_seen 140개, train 3553개. 과제 번호 = 정렬된 게임 목록의 인덱스.
+- 행동은 자유 형식 명령이고 허용 명령 목록(admissible commands) 중에서 고른다. 보상은 성공 1 / 실패 0.
+- 막힘 신호: 허용 목록에 없는 명령, 최근 6스텝 안에서 같은 행동 반복, "Nothing happens".
+- 프롬프트는 `agent.py`의 `Domain`(WEBSHOP / ALFWORLD)으로 갈린다. 계획·확장 논리는 공유.
+- `--tiers` 난이도 표는 WebShop용이다. ALFWorld는 쓰지 않는다.
+
 ## 결과 보기 (표 + 그래프)
 
 ```bash

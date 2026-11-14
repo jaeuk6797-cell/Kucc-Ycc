@@ -1,6 +1,7 @@
 """쇼핑 환경.
 
 - WebShopEnv : 실제 WebShop (princeton-nlp/WebShop) 텍스트 환경을 감싼 어댑터
+- ALFWorldEnv: ALFWorld 가정 환경 (자유 형식 명령, 허용 명령 목록 제공)
 - FakeShop   : 테스트용 가짜 쇼핑몰. 행동 형식(search[...], click[...])과 화면 구조를 흉내 낸다.
 
 두 환경 모두 같은 세 메서드를 제공한다.
@@ -42,6 +43,71 @@ class WebShopEnv:
 
     def available(self) -> dict:
         return self.env.get_available_actions()
+
+
+# ---------------------------------------------------------------- ALFWorld
+
+class ALFWorldEnv:
+    """ALFWorld 텍스트 환경(TextWorld 판) 어댑터. 과제 번호 = 정렬된 게임 파일 목록의 인덱스.
+
+    ALFWORLD_DATA 환경변수(기본 ~/.cache/alfworld)의 json_2.1.1/<split> 아래에서 게임을 모은다.
+    split: train(6374 파일, 풀 수 있는 것만) / valid_seen / valid_unseen / valid_train.
+    행동은 자유 형식 명령이고 매 스텝 허용 명령 목록(admissible commands)이 주어진다.
+    보상은 성공하면 1, 아니면 0 (ALFWorld는 중간 보상이 없다).
+    """
+
+    domain = "alfworld"
+
+    def __init__(self, split: str = "valid_unseen", data_dir: str | None = None):
+        import json
+        import os
+
+        root = os.path.expandvars(data_dir or os.environ.get("ALFWORLD_DATA", "~/.cache/alfworld"))
+        root = os.path.join(os.path.expanduser(root), "json_2.1.1", split)
+        files = []
+        for d, _, names in os.walk(root):
+            if "traj_data.json" not in names or "movable" in d or "Sliced" in d:
+                continue
+            gf = os.path.join(d, "game.tw-pddl")
+            if not os.path.exists(gf):
+                continue
+            with open(gf, encoding="utf-8") as f:
+                if not json.load(f).get("solvable", False):
+                    continue
+            files.append(gf)
+        self.game_files = sorted(files)
+        if not self.game_files:
+            raise FileNotFoundError(f"ALFWorld 게임을 찾지 못함: {root} (alfworld-download 를 했는지 확인)")
+        self.env = None
+        self.infos: dict = {}
+
+    def reset(self, session: int) -> tuple[str, str]:
+        import re
+
+        import textworld
+        import textworld.gym
+        from alfworld.agents.environment.alfred_tw_env import AlfredDemangler, AlfredInfos
+
+        if self.env is not None:
+            self.env.close()
+        gf = self.game_files[session]
+        infos = textworld.EnvInfos(won=True, admissible_commands=True, extras=["gamefile"])
+        env_id = textworld.gym.register_games([gf], infos, batch_size=None,
+                                              wrappers=[AlfredDemangler(shuffle=False), AlfredInfos])
+        self.env = textworld.gym.make(env_id)
+        obs, self.infos = self.env.reset()
+        obs = re.sub(r"^-=.*?=-\s*", "", obs, flags=re.S).strip()
+        m = re.search(r"Your task is to:\s*(.+)", obs)
+        return obs, (m.group(1).strip() if m else obs)
+
+    def step(self, action: str) -> tuple[str, float, bool]:
+        obs, _, done, self.infos = self.env.step(action)
+        won = bool(self.infos.get("won"))
+        return obs.strip(), 1.0 if won else 0.0, bool(done) or won
+
+    def available(self) -> dict:
+        cmds = [c for c in self.infos.get("admissible_commands", []) if c != "help"]
+        return {"has_search_bar": False, "free_text": True, "clickables": cmds}
 
 
 # ---------------------------------------------------------------- 가짜 쇼핑몰 (테스트용)

@@ -106,6 +106,49 @@ ACT_SYSTEM = (
 )
 
 
+@dataclass(frozen=True)
+class Domain:
+    """환경별 프롬프트와 행동 형식. 계획·확장 논리는 같고 사이트 설명과 행동 모양만 다르다."""
+    name: str
+    plan_system: str
+    refine_system: str
+    act_system: str
+
+
+WEBSHOP = Domain("webshop", PLAN_SYSTEM, REFINE_SYSTEM, ACT_SYSTEM)
+
+ALF_GUIDE = (
+    "The task is a household text game (ALFWorld). You are in a house with receptacles such as "
+    "cabinets, drawers, countertops, a fridge, a microwave, a sink, a stove, a desk and a sofa. "
+    "Typical goals: put an object somewhere; clean, heat or cool an object and then put it "
+    "somewhere; look at an object under a desk lamp; put two objects somewhere. "
+    "Commands look like 'go to desk 1', 'open drawer 2', 'take mug 1 from desk 1', "
+    "'put mug 1 in/on shelf 1', 'clean X with sinkbasin 1', 'heat X with microwave 1', "
+    "'cool X with fridge 1', 'use desklamp 1'. You can only carry one object at a time. "
+    "Objects are usually found in plausible places (a mug near a coffee machine or in a cabinet). "
+    "Closed receptacles must be opened before you can see inside. Do not search the same place twice. "
+)
+ALF_PLAN = (
+    "You are a planner for a household agent. Plans are hierarchical: plan 1 is a coarse outline, "
+    "and each next level refines the previous one with more concrete places to search and "
+    "conditions while keeping the same overall goal. " + ALF_GUIDE +
+    "Write only numbered lines in the form 'Step k: ...'."
+)
+ALF_REFINE = (
+    "You are a planner for a household agent. The agent got stuck on one step of its plan. "
+    "Break that single step into 2-4 smaller concrete sub-steps based on the current situation. "
+    + ALF_GUIDE + "Write only numbered lines in the form 'Step k: ...'."
+)
+ALF_ACT = (
+    "You are a household agent. Follow the plan. Choose exactly one action, copied exactly from "
+    "the available actions list.\n" + ALF_GUIDE + "\n"
+    "Answer in exactly two lines:\nStep: <number of the step you are working on in the most "
+    "detailed plan>\nAction: <action>"
+)
+ALFWORLD = Domain("alfworld", ALF_PLAN, ALF_REFINE, ALF_ACT)
+DOMAINS = {"webshop": WEBSHOP, "alfworld": ALFWORLD}
+
+
 def _steps(text: str) -> list[str]:
     """'Step k: ...' 줄만 뽑아 단계 목록으로 만든다."""
     found = re.findall(r"Step\s*\d+\s*[:.]\s*(.+)", text)
@@ -113,7 +156,7 @@ def _steps(text: str) -> list[str]:
 
 
 def make_level(llm: LLM, instruction: str, plan: Plan, rules: tuple[str, ...],
-               note: str = "") -> int:
+               note: str = "", dom: Domain = WEBSHOP) -> int:
     """계획에 레벨 하나를 추가하고 사용한 토큰 수를 돌려준다."""
     level = len(plan.levels) + 1
     user = f"# Instruction\n{instruction}\n"
@@ -124,22 +167,26 @@ def make_level(llm: LLM, instruction: str, plan: Plan, rules: tuple[str, ...],
     if note:
         user += f"# Situation\n{note}\n"
     user += f"# Write plan {level}" + (" (more detailed than the previous level)" if level > 1 else "")
-    r = llm.chat("plan", PLAN_SYSTEM, user)
+    r = llm.chat("plan", dom.plan_system, user)
     plan.levels.append(_steps(r.text))
     return r.tokens
 
 
-def refine_step(llm: LLM, instruction: str, plan: Plan, step_no: int, note: str) -> int:
+def refine_step(llm: LLM, instruction: str, plan: Plan, step_no: int, note: str,
+                dom: Domain = WEBSHOP) -> int:
     """막힌 단계 하나를 하위 단계로 나눈다."""
     user = (f"# Instruction\n{instruction}\n# Plan\n{plan.render()}\n"
             f"# Stuck step\nStep {step_no}\n# Situation\n{note}\n# Sub-steps for step {step_no}")
-    r = llm.chat("refine", REFINE_SYSTEM, user)
+    r = llm.chat("refine", dom.refine_system, user)
     plan.local[step_no] = _steps(r.text)
     return r.tokens
 
 
-def parse_action(text: str) -> tuple[int, str | None]:
+def parse_action(text: str, dom: Domain = WEBSHOP) -> tuple[int, str | None]:
     m_step = re.search(r"Step:\s*(\d+)", text)
+    if dom.name == "alfworld":      # 자유 형식 명령 한 줄
+        m_act = re.search(r"Action:\s*(.+)", text, re.IGNORECASE)
+        return (int(m_step.group(1)) if m_step else 1), (m_act.group(1).strip() if m_act else None)
     m_act = re.search(r"Action:\s*((?:search|click)\[.*?\])", text, re.IGNORECASE)
     step_no = int(m_step.group(1)) if m_step else 1
     return step_no, (m_act.group(1) if m_act else None)
@@ -147,6 +194,8 @@ def parse_action(text: str) -> tuple[int, str | None]:
 
 def is_valid(action: str, avail: dict) -> bool:
     a = action.strip().lower()
+    if avail.get("free_text"):      # ALFWorld: 허용 명령 목록에 있어야 유효
+        return a in [c.lower() for c in avail.get("clickables", [])]
     if a.startswith("search["):
         return bool(avail.get("has_search_bar"))
     if a.startswith("click["):
@@ -171,11 +220,12 @@ class RunConfig:
 
 def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Trial:
     t0 = time.time()
+    dom = DOMAINS[getattr(env, "domain", "webshop")]
     obs, instruction = env.reset(session)
     plan = Plan()
     tokens = 0
     for _ in range(s.start_level):
-        tokens += make_level(llm, instruction, plan, s.rules)
+        tokens += make_level(llm, instruction, plan, s.rules, dom=dom)
 
     history: list[tuple[str, str]] = []
     marks: list[bool] = []        # 스텝마다 막힘 신호가 있었는지 (확장하면 비운다)
@@ -187,21 +237,31 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
     while steps < cfg.max_steps and not done:
         avail = env.available()
         recent = "\n".join(f"> {a}\n{o}" for a, o in history[-cfg.history_len:]) or "(none)"
-        user = (f"# Instruction\n{instruction}\n# Plan\n{plan.render()}\n"
-                f"# Recent history\n{recent}\n# Current observation\n{_short(obs, cfg.obs_chars)}\n"
-                f"# Options selected on this product\n{', '.join(selected) or '(none)'}\n"
-                f"# Available actions\nSearch bar: {'yes' if avail.get('has_search_bar') else 'no'}\n"
-                f"Clickables: {' | '.join(avail.get('clickables', []))}")
-        r = llm.chat("act", ACT_SYSTEM, user, temperature=cfg.act_temperature)
+        head = (f"# Instruction\n{instruction}\n# Plan\n{plan.render()}\n"
+                f"# Recent history\n{recent}\n# Current observation\n{_short(obs, cfg.obs_chars)}\n")
+        if dom.name == "alfworld":
+            user = head + "# Available actions\n" + "\n".join(avail.get("clickables", []))
+        else:
+            user = (head + f"# Options selected on this product\n{', '.join(selected) or '(none)'}\n"
+                    f"# Available actions\nSearch bar: {'yes' if avail.get('has_search_bar') else 'no'}\n"
+                    f"Clickables: {' | '.join(avail.get('clickables', []))}")
+        r = llm.chat("act", dom.act_system, user, temperature=cfg.act_temperature)
         tokens += r.tokens
         steps += 1
-        step_no, action = parse_action(r.text)
+        step_no, action = parse_action(r.text, dom)
 
         # -- 막힘 신호: 무효 행동, 또는 이미 본 화면으로 돌아온 행동
         #    (화면이 안 바뀐 경우도 포함. 검색→상품→검색으로 맴도는 반복도 잡는다)
         if action is None or not is_valid(action, avail):
             marks.append(True)
             history.append((action or r.text.strip()[:60], "Invalid action."))
+        elif dom.name == "alfworld":
+            # 막힘: 최근에 한 같은 행동을 또 하거나, 아무 일도 안 일어남
+            repeat = action.strip().lower() in [a.strip().lower() for a, _ in history[-6:]]
+            new_obs, reward, done = env.step(action)
+            marks.append(repeat or new_obs.strip().lower().startswith("nothing happens"))
+            history.append((action, _short(new_obs)))
+            obs = new_obs
         else:
             target = action.strip().lower()[6:-1] if action.lower().startswith("click[") else ""
             on_item = "buy now" in [c.lower() for c in avail.get("clickables", [])]
@@ -227,9 +287,9 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
                    "\n".join(f"> {a} -> {o[:80]}" for a, o in history[-s.trigger_n:])
             add_level = s.scope == "global" or (s.scope == "hybrid" and len(plan.levels) < s.max_level)
             if add_level and len(plan.levels) < s.max_level:
-                tokens += make_level(llm, instruction, plan, s.rules, note)
+                tokens += make_level(llm, instruction, plan, s.rules, note, dom)
             elif s.scope in ("local", "hybrid"):
-                tokens += refine_step(llm, instruction, plan, step_no, note)
+                tokens += refine_step(llm, instruction, plan, step_no, note, dom)
             else:
                 continue          # global인데 이미 최대 레벨: 더 확장할 수 없음
             expansions += 1

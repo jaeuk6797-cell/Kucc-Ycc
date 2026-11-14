@@ -42,8 +42,12 @@ def build(args, need_env: bool = True):
         factory = ScriptedLLM
         teacher_llm = None
     else:
-        from envs import WebShopEnv
-        env = WebShopEnv(num_products=args.num_products) if need_env else None
+        if args.env == "alfworld":
+            from envs import ALFWorldEnv
+            env = ALFWorldEnv(split=args.alf_split) if need_env else None
+        else:
+            from envs import WebShopEnv
+            env = WebShopEnv(num_products=args.num_products) if need_env else None
         if args.provider == "anthropic":
             from llm import AnthropicLLM
             llm = AnthropicLLM(args.model or "claude-haiku-5-5", effort=args.effort)
@@ -71,6 +75,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["episode", "difficulty", "search", "eval"])
     ap.add_argument("--mock", action="store_true")
+    ap.add_argument("--env", choices=["webshop", "alfworld"], default="webshop",
+                    help="실행할 환경. alfworld는 ALFWORLD_DATA 환경변수와 alfworld 패키지가 필요")
+    ap.add_argument("--alf-split", default="valid_unseen",
+                    choices=["train", "valid_seen", "valid_unseen", "valid_train"],
+                    help="ALFWorld 분할. 과제 번호 = 정렬된 게임 목록의 인덱스 (valid_unseen 약 134~255개)")
     ap.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic",
                     help="anthropic: Claude API / openai: vLLM 등 OpenAI 형식 서버")
     ap.add_argument("--model", default=None,
