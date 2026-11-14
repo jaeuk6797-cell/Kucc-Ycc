@@ -46,7 +46,7 @@ def build(args, need_env: bool = True):
         env = WebShopEnv(num_products=args.num_products) if need_env else None
         if args.provider == "anthropic":
             from llm import AnthropicLLM
-            llm = AnthropicLLM(args.model or "claude-opus-5-5", effort=args.effort)
+            llm = AnthropicLLM(args.model or "claude-haiku-5-5", effort=args.effort)
             teacher_llm = AnthropicLLM(args.teacher_model, effort=args.teacher_effort) \
                 if args.teacher_model else None
         else:
@@ -74,13 +74,15 @@ def main() -> None:
     ap.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic",
                     help="anthropic: Claude API / openai: vLLM 등 OpenAI 형식 서버")
     ap.add_argument("--model", default=None,
-                    help="비우면 anthropic=claude-opus-5-5, openai=Llama-3.1-8B-Instruct")
+                    help="에피소드 실행용. 비우면 anthropic=claude-haiku-5-5(싸게), openai=Llama-3.1-8B-Instruct")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high", "xhigh", "max"],
                     help="Claude 생각 깊이 (에이전트 행동용)")
     ap.add_argument("--teacher-effort", default="high",
                     choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--base-url", default=None)
-    ap.add_argument("--teacher-model", default=None, help="비우면 무작위 편집 교사 사용")
+    ap.add_argument("--teacher-model", default=None,
+                    help="교사 모델. 비우면 anthropic=claude-sonnet-5-5, openai=무작위 편집 교사")
+    ap.add_argument("--random-teacher", action="store_true", help="anthropic에서도 무작위 편집 교사 사용")
     ap.add_argument("--teacher-base-url", default=None)
     ap.add_argument("--num-products", type=int, default=None)
     ap.add_argument("--max-steps", type=int, default=20)
