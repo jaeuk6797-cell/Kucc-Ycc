@@ -172,7 +172,10 @@ def restrict(runs: Runs, tasks: list[int]) -> Runs:
 
 
 def summarize(runs: Runs, sid: str, tasks: list[int], k: int) -> Stat:
-    trials = [runs[sid][(t, r)] for t in tasks for r in range(k)]
+    bucket = runs.get(sid, {})
+    trials = [bucket[(t, r)] for t in tasks for r in range(k) if (t, r) in bucket]   # 레이스로 일부만 돌렸어도 계산
+    if not trials:
+        return Stat(succ=0.0, cost=math.inf, steps=math.inf, expand=0.0, n=0)
     ok = [x for x in trials if x.success]
     return Stat(
         succ=len(ok) / len(trials),
@@ -204,6 +207,54 @@ def select_survivors(pool: list[Strategy], stats: dict[str, Stat], keep: int,
         leaders.setdefault(by_sid[sid].start_level, sid)
     chosen = list(dict.fromkeys(list(leaders.values()) + ordered))[: max(keep, len(leaders))]
     return [by_sid[sid] for sid in chosen]
+
+
+def eliminate(active: list[Strategy], stats: dict[str, Stat], n: int, protect: set[str],
+              z: float) -> list[Strategy]:
+    """성공률 상한이 선두의 하한보다 낮고, 토큰도 선두보다 싸지 않으면 탈락.
+    protect(기준 전략 등)는 남긴다. 성공률만 보면 '싸지만 약한' 전략을 잘못 버리므로 비용도 함께 본다."""
+    margin = z * math.sqrt(0.25 / max(n, 1))
+    leader = max(active, key=lambda s: (stats[s.sid].succ, -stats[s.sid].cost))
+    ls = stats[leader.sid]
+    keep = []
+    for s in active:
+        st = stats[s.sid]
+        out = st.succ + margin < ls.succ - margin and st.cost >= ls.cost
+        if s.sid in protect or not out:
+            keep.append(s)
+    return keep
+
+
+def race_round(runs: Runs, runner: TaskRunner, pool: list[Strategy], tasks: list[int], k: int,
+               budget: Budget, log_fn=None, protect: set[str] = frozenset(),
+               chunk: int = 10, z: float = 2.0, min_n: int = 10) -> list[Strategy]:
+    """과제를 chunk개씩 나눠 남은 전략 전체를 한 번에(병렬로) 돌리고, 가망 없는 전략은 중간에 멈춘다.
+    모든 전략이 같은 과제 순서로 도니까 중간 비교도 같은 과제 위에서 이뤄진다."""
+    active = list(pool)
+    for i in range(0, len(tasks), chunk):
+        part = tasks[i:i + chunk]
+        ensure_runs(runs, runner, active, part, k, budget, log_fn)
+        done = tasks[:i + len(part)]
+        if len(active) > 1 and len(done) * k >= min_n and i + chunk < len(tasks):
+            stats = {s.sid: summarize(runs, s.sid, done, k) for s in active}
+            active = eliminate(active, stats, len(done) * k, protect, z)
+    return active
+
+
+def failure_report(runs: Runs, sid: str, tasks: list[int], k: int, top: int = 8) -> dict:
+    """교사에게 줄 실패 요약: 실패 과제 번호(많이 실패한 순)와 실패 시 평균 확장 횟수."""
+    bucket = runs.get(sid, {})
+    fails: dict[int, int] = {}
+    exp = []
+    for t in tasks:
+        for r in range(k):
+            tr = bucket.get((t, r))
+            if tr and not tr.success:
+                fails[t] = fails.get(t, 0) + 1
+                exp.append(tr.expansions)
+    worst = sorted(fails, key=lambda t: -fails[t])[:top]
+    return {"failed_tasks": worst, "n_failed_tasks": len(fails),
+            "mean_expand_on_fail": round(sum(exp) / len(exp), 2) if exp else 0.0}
 
 
 def paired_ci(runs: Runs, a: Strategy, b: Strategy, tasks: list[int], k: int,
@@ -255,7 +306,7 @@ def apply_edit(p: Strategy, edit: dict) -> Strategy | None:
 class RandomEditTeacher:
     """테스트용 교사: 부모 하나에 무작위 편집 하나."""
 
-    def propose(self, parents, n, rng, stats=None) -> list[Strategy]:
+    def propose(self, parents, n, rng, stats=None, failures=None) -> list[Strategy]:
         out = []
         while len(out) < n:
             p = rng.choice(parents)
@@ -275,8 +326,9 @@ class RandomEditTeacher:
 
 TEACHER_SYSTEM = (
     "You improve strategies for a hierarchical-planning web shopping agent. You see surviving "
-    "strategies with their success rate, mean tokens and mean expansions. Find what the good "
-    "ones have in common and propose edits. Reply with a JSON list only, each item: "
+    "strategies with their success rate, mean tokens and mean expansions, plus the tasks each "
+    "one still fails. Aim edits at those failures (fix what fails) instead of re-tuning what "
+    "already works. Find what the good ones have in common and propose edits. Reply with a JSON list only, each item: "
     '{"parent": "<sid>", "op": "set", "field": "<field>", "value": <value>} or '
     '{"parent": "<sid>", "op": "add_rule"|"drop_rule", "rule": "<text>"}. '
     f"Editable fields and allowed values: {json.dumps(EDITABLE)}."
@@ -291,10 +343,11 @@ class LLMTeacher:
         self.llm = llm
         self.fallback = RandomEditTeacher()
 
-    def propose(self, parents, n, rng, stats=None) -> list[Strategy]:
+    def propose(self, parents, n, rng, stats=None, failures=None) -> list[Strategy]:
         rows = [{**{k: v for k, v in asdict(p).items()},
                  **({"succ": round(stats[p.sid].succ, 3), "tokens": round(stats[p.sid].cost),
-                     "expand": round(stats[p.sid].expand, 2)} if stats and p.sid in stats else {})}
+                     "expand": round(stats[p.sid].expand, 2)} if stats and p.sid in stats else {}),
+                 **({"failures": failures[p.sid]} if failures and p.sid in failures else {})}
                 for p in parents]
         r = self.llm.chat("teacher", TEACHER_SYSTEM,
                           f"Strategies:\n{json.dumps(rows, ensure_ascii=False)}\nPropose {n} edits.",
@@ -326,9 +379,13 @@ class SearchConfig:
     children: int = 6
     min_succ: float = 0.0     # 이 성공률 미만은 파레토 전선에서 제외 (싸지만 실패만 하는 전략 방지)
     seed: int = 0
+    race: bool = True         # 가망 없는 전략을 라운드 중간에 탈락시킨다
+    race_chunk: int = 10      # 과제 몇 개마다 중간 비교할지
+    race_z: float = 2.0       # 클수록 신중하게 탈락 (2.0 ≈ 95%)
 
 
-def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None, cache: Runs | None = None):
+def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None, cache: Runs | None = None,
+               protect: set[str] = frozenset()):
     """cache: 이전 실행 기록 (이어서 돌릴 때). 이미 있는 실행은 다시 하지 않고, 예산에서 미리 뺀다."""
     rng = random.Random(cfg.seed)
     budget = Budget(cfg.max_runs)
@@ -339,17 +396,25 @@ def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None, ca
     try:
         for r in range(cfg.rounds):
             k = cfg.k0 * 2**r
-            ensure_runs(runs, runner, pool, tasks, k, budget, log_fn)    # 라운드의 전략 전체를 한 번에
-            stats = {s.sid: summarize(runs, s.sid, tasks, k) for s in pool}
-            survivors = select_survivors(pool, stats, max(2, int(len(pool) * cfg.keep_frac)),
+            if cfg.race:
+                active = race_round(runs, runner, pool, tasks, k, budget, log_fn, protect,
+                                    cfg.race_chunk, cfg.race_z)
+            else:
+                ensure_runs(runs, runner, pool, tasks, k, budget, log_fn)    # 라운드의 전략 전체를 한 번에
+                active = list(pool)
+            dropped = [s.sid for s in pool if s not in active]
+            stats = {s.sid: summarize(runs, s.sid, tasks, k) for s in active}
+            survivors = select_survivors(active, stats, max(2, int(len(pool) * cfg.keep_frac)),
                                          cfg.min_succ)
-            log.append({"round": r, "k": k, "pool": len(pool), "budget_left": budget.left,
+            log.append({"round": r, "k": k, "pool": len(pool), "dropped_early": dropped,
+                        "budget_left": budget.left,
                         "front": pareto_front(stats),
                         "stats": {sid: asdict(st) for sid, st in stats.items()}})
             print(f"[round {r}] k={k} pool={len(pool)} budget_left={budget.left} "
                   f"top={[(s.sid, round(stats[s.sid].succ, 3)) for s in survivors[:3]]}", flush=True)
             if r < cfg.rounds - 1:
-                children = teacher.propose(survivors, cfg.children, rng, stats)
+                failures = {x.sid: failure_report(runs, x.sid, tasks, k) for x in survivors}
+                children = teacher.propose(survivors, cfg.children, rng, stats, failures)
                 seen = {s.key() for s in pool}
                 fresh = list({c.key(): c for c in children if c.key() not in seen}.values())
                 pool = survivors + fresh

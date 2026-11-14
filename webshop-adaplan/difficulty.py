@@ -77,3 +77,23 @@ def spearman(xs: list[float], ys: list[float]) -> float:
     sx = sum((a - mx) ** 2 for a in rx) ** 0.5
     sy = sum((b - my) ** 2 for b in ry) ** 0.5
     return cov / (sx * sy) if sx and sy else 0.0
+
+
+def load_tiers(path: str) -> dict[int, int]:
+    with open(path, encoding="utf-8-sig") as f:
+        return {int(r["task"]): int(r["tier"]) for r in csv.DictReader(f)}
+
+
+def informative_tasks(tasks: list[int], tiers: dict[int, int], edge_keep: int = 10,
+                      seed: int = 0) -> list[int]:
+    """정보가 많은 과제만 남긴다. 확장 1~3번(2~4단계)은 전략마다 결과가 갈리는 과제라 전부 남기고,
+    항상 풀리는 1단계와 대부분 못 푸는 5단계는 각각 edge_keep개만 무작위로 남긴다.
+    난이도 표에 없는 과제는 그대로 둔다. 순서는 원래 순서를 유지한다."""
+    import random
+    rng = random.Random(seed)
+    edge = {1: [], 5: []}
+    for t in tasks:
+        if tiers.get(t) in edge:
+            edge[tiers[t]].append(t)
+    keep_edge = {t for ts in edge.values() for t in rng.sample(ts, min(edge_keep, len(ts)))}
+    return [t for t in tasks if tiers.get(t) not in edge or t in keep_edge]

@@ -23,7 +23,7 @@ from dataclasses import asdict
 from functools import partial
 
 from agent import RunConfig, Strategy, run_episode
-from difficulty import assign_tiers, spearman
+from difficulty import assign_tiers, informative_tasks, load_tiers, spearman
 from search import (Budget, LLMTeacher, RandomEditTeacher, SearchConfig, TaskRunner, confirm,
                     load_runs, run_search)
 
@@ -105,6 +105,12 @@ def main() -> None:
     ap.add_argument("--max-runs", type=int, default=3000, help="탐색 실행 상한 (확인 단계는 별도로 같은 상한)")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--confirm-k", type=int, default=2)
+    # 예산 절약
+    ap.add_argument("--tiers", default=None,
+                    help="난이도 표(tiers.csv). 주면 search/select 과제에서 1·5단계를 줄인다")
+    ap.add_argument("--edge-keep", type=int, default=10, help="1단계·5단계에서 각각 남길 과제 수")
+    ap.add_argument("--no-race", action="store_true", help="중간 탈락(레이싱) 끄기")
+    ap.add_argument("--race-chunk", type=int, default=10, help="과제 몇 개마다 중간 비교할지")
     ap.add_argument("--seed", type=int, default=0, help="탐색 시드 (교사 편집의 무작위성)")
     ap.add_argument("--search-log", default="search_log.json")
     ap.add_argument("--resume", action="store_true",
@@ -166,10 +172,20 @@ def main() -> None:
             log_file.write(json.dumps(row) + "\n")
             log_file.flush()
 
-        scfg = SearchConfig(max_runs=args.max_runs, rounds=args.rounds, seed=args.seed)
-        survivors, _, log = run_search(runner, teacher, seeds, task_range(args.search), scfg, log_fn,
-                                       cache=cache)
-        result = confirm(runner, survivors, baseline, task_range(args.select),
+        search_tasks, select_tasks = task_range(args.search), task_range(args.select)
+        if args.tiers:      # 정보 없는 과제(항상 성공/항상 실패)를 줄여 같은 예산으로 더 많이 비교
+            tiers = load_tiers(args.tiers)
+            n0 = len(search_tasks) + len(select_tasks)
+            search_tasks = informative_tasks(search_tasks, tiers, args.edge_keep)
+            select_tasks = informative_tasks(select_tasks, tiers, args.edge_keep)
+            print(f"[tiers] 과제 {n0} → {len(search_tasks) + len(select_tasks)}개 "
+                  f"(탐색 {len(search_tasks)}, 선택 {len(select_tasks)}; 테스트는 전부 유지)", flush=True)
+
+        scfg = SearchConfig(max_runs=args.max_runs, rounds=args.rounds, seed=args.seed,
+                            race=not args.no_race, race_chunk=args.race_chunk)
+        survivors, _, log = run_search(runner, teacher, seeds, search_tasks, scfg, log_fn,
+                                       cache=cache, protect={baseline.sid})
+        result = confirm(runner, survivors, baseline, select_tasks,
                          task_range(args.test), args.confirm_k, Budget(args.max_runs), log_fn,
                          cache=cache)
         log_file.close()
