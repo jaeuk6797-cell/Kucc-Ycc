@@ -77,7 +77,7 @@ def main() -> None:
                     help="에피소드 실행용. 비우면 anthropic=claude-haiku-5-5(싸게), openai=Llama-3.1-8B-Instruct")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high", "xhigh", "max"],
                     help="Claude 생각 깊이 (에이전트 행동용)")
-    ap.add_argument("--teacher-effort", default="high",
+    ap.add_argument("--teacher-effort", default="medium",
                     choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--teacher-model", default=None,
