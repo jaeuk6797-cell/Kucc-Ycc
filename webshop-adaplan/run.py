@@ -25,7 +25,7 @@ from functools import partial
 from agent import RunConfig, Strategy, run_episode
 from difficulty import assign_tiers, informative_tasks, load_tiers, spearman
 from search import (Budget, LLMTeacher, RandomEditTeacher, SearchConfig, TaskRunner, confirm,
-                    load_runs, run_search)
+                    load_runs, run_search, summarize)
 
 
 def task_range(text: str) -> list[int]:
@@ -110,7 +110,12 @@ def main() -> None:
                     help="난이도 표(tiers.csv). 주면 search/select 과제에서 1·5단계를 줄인다")
     ap.add_argument("--edge-keep", type=int, default=10, help="1단계·5단계에서 각각 남길 과제 수")
     ap.add_argument("--no-race", action="store_true", help="중간 탈락(레이싱) 끄기")
-    ap.add_argument("--race-chunk", type=int, default=10, help="과제 몇 개마다 중간 비교할지")
+    ap.add_argument("--race-chunk", type=int, default=5, help="과제 몇 개마다 중간 비교할지")
+    ap.add_argument("--race-z", type=float, default=2.0, help="마지막 라운드 탈락 기준 (클수록 신중)")
+    ap.add_argument("--race-z-early", type=float, default=1.5, help="앞 라운드 탈락 기준 (더 공격적)")
+    ap.add_argument("--children", type=int, default=4, help="라운드마다 교사가 만드는 자식 전략 수")
+    ap.add_argument("--confirm-top", type=int, default=3, help="선택 과제에서 확인할 상위 후보 수")
+    ap.add_argument("--no-skip-test", action="store_true", help="승자가 기준 전략보다 낮아도 테스트를 돌린다")
     ap.add_argument("--seed", type=int, default=0, help="탐색 시드 (교사 편집의 무작위성)")
     ap.add_argument("--search-log", default="search_log.json")
     ap.add_argument("--resume", action="store_true",
@@ -182,12 +187,16 @@ def main() -> None:
                   f"(탐색 {len(search_tasks)}, 선택 {len(select_tasks)}; 테스트는 전부 유지)", flush=True)
 
         scfg = SearchConfig(max_runs=args.max_runs, rounds=args.rounds, seed=args.seed,
-                            race=not args.no_race, race_chunk=args.race_chunk)
-        survivors, _, log = run_search(runner, teacher, seeds, search_tasks, scfg, log_fn,
+                            race=not args.no_race, race_chunk=args.race_chunk, race_z=args.race_z,
+                            race_z_early=args.race_z_early, children=args.children)
+        survivors, search_runs, log = run_search(runner, teacher, seeds, search_tasks, scfg, log_fn,
                                        cache=cache, protect={baseline.sid})
+        k_last = scfg.k0 * 2 ** (scfg.rounds - 1)
+        search_stats = {sid: summarize(search_runs, sid, search_tasks, k_last) for sid in search_runs}
         result = confirm(runner, survivors, baseline, select_tasks,
                          task_range(args.test), args.confirm_k, Budget(args.max_runs), log_fn,
-                         cache=cache)
+                         cache=cache, top=args.confirm_top, search_stats=search_stats,
+                         skip_margin=9.0 if args.no_skip_test else 0.05)
         log_file.close()
         with open(args.search_log, "w", encoding="utf-8") as f:
             json.dump({"log": log, "result": result}, f, ensure_ascii=False, indent=2, default=str)

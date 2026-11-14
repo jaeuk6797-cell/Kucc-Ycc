@@ -209,25 +209,47 @@ def select_survivors(pool: list[Strategy], stats: dict[str, Stat], keep: int,
     return [by_sid[sid] for sid in chosen]
 
 
-def eliminate(active: list[Strategy], stats: dict[str, Stat], n: int, protect: set[str],
-              z: float) -> list[Strategy]:
-    """성공률 상한이 선두의 하한보다 낮고, 토큰도 선두보다 싸지 않으면 탈락.
+def eliminate(active: list[Strategy], stats: dict[str, Stat], runs: Runs, tasks: list[int], k: int,
+              protect: set[str], z: float, min_tasks: int = 5) -> list[Strategy]:
+    """선두와 과제별로 짝지어 비교해서, 선두가 유의하게 낫고 토큰도 더 싸지 않으면 탈락.
+    짝지은 차이는 과제 난이도 변동이 상쇄돼 독립 비교보다 훨씬 일찍 탈락시킬 수 있다.
     protect(기준 전략 등)는 남긴다. 성공률만 보면 '싸지만 약한' 전략을 잘못 버리므로 비용도 함께 본다."""
-    margin = z * math.sqrt(0.25 / max(n, 1))
     leader = max(active, key=lambda s: (stats[s.sid].succ, -stats[s.sid].cost))
     ls = stats[leader.sid]
+
+    def per_task(sid: str) -> dict[int, float]:
+        b = runs.get(sid, {})
+        out = {}
+        for t in tasks:
+            xs = [b[(t, r)].success for r in range(k) if (t, r) in b]
+            if xs:
+                out[t] = sum(xs) / len(xs)
+        return out
+
+    lead = per_task(leader.sid)
     keep = []
     for s in active:
-        st = stats[s.sid]
-        out = st.succ + margin < ls.succ - margin and st.cost >= ls.cost
-        if s.sid in protect or not out:
+        if s.sid == leader.sid or s.sid in protect:
+            keep.append(s)
+            continue
+        mine = per_task(s.sid)
+        common = [t for t in lead if t in mine]
+        if len(common) < min_tasks:
+            keep.append(s)
+            continue
+        d = [lead[t] - mine[t] for t in common]
+        m = sum(d) / len(d)
+        sd = (sum((x - m) ** 2 for x in d) / (len(d) - 1)) ** 0.5
+        se = max(sd, 0.25) / math.sqrt(len(d))          # 차이가 우연히 0이어도 너무 확신하지 않게 바닥값
+        out = m - z * se > 0 and stats[s.sid].cost >= ls.cost
+        if not out:
             keep.append(s)
     return keep
 
 
 def race_round(runs: Runs, runner: TaskRunner, pool: list[Strategy], tasks: list[int], k: int,
                budget: Budget, log_fn=None, protect: set[str] = frozenset(),
-               chunk: int = 10, z: float = 2.0, min_n: int = 10) -> list[Strategy]:
+               chunk: int = 5, z: float = 2.0, min_tasks: int = 5) -> list[Strategy]:
     """과제를 chunk개씩 나눠 남은 전략 전체를 한 번에(병렬로) 돌리고, 가망 없는 전략은 중간에 멈춘다.
     모든 전략이 같은 과제 순서로 도니까 중간 비교도 같은 과제 위에서 이뤄진다."""
     active = list(pool)
@@ -235,9 +257,9 @@ def race_round(runs: Runs, runner: TaskRunner, pool: list[Strategy], tasks: list
         part = tasks[i:i + chunk]
         ensure_runs(runs, runner, active, part, k, budget, log_fn)
         done = tasks[:i + len(part)]
-        if len(active) > 1 and len(done) * k >= min_n and i + chunk < len(tasks):
+        if len(active) > 1 and len(done) >= min_tasks and i + chunk < len(tasks):
             stats = {s.sid: summarize(runs, s.sid, done, k) for s in active}
-            active = eliminate(active, stats, len(done) * k, protect, z)
+            active = eliminate(active, stats, runs, done, k, protect, z, min_tasks)
     return active
 
 
@@ -380,8 +402,9 @@ class SearchConfig:
     min_succ: float = 0.0     # 이 성공률 미만은 파레토 전선에서 제외 (싸지만 실패만 하는 전략 방지)
     seed: int = 0
     race: bool = True         # 가망 없는 전략을 라운드 중간에 탈락시킨다
-    race_chunk: int = 10      # 과제 몇 개마다 중간 비교할지
-    race_z: float = 2.0       # 클수록 신중하게 탈락 (2.0 ≈ 95%)
+    race_chunk: int = 5       # 과제 몇 개마다 중간 비교할지
+    race_z: float = 2.0       # 마지막 라운드의 탈락 기준 (클수록 신중, 2.0 ≈ 97.5% 단측)
+    race_z_early: float = 1.5 # 앞 라운드는 공격적으로 (어차피 승자는 뒤 라운드와 확인 단계에서 다시 검증)
 
 
 def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None, cache: Runs | None = None,
@@ -397,8 +420,9 @@ def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None, ca
         for r in range(cfg.rounds):
             k = cfg.k0 * 2**r
             if cfg.race:
+                z = cfg.race_z if r == cfg.rounds - 1 else cfg.race_z_early
                 active = race_round(runs, runner, pool, tasks, k, budget, log_fn, protect,
-                                    cfg.race_chunk, cfg.race_z)
+                                    cfg.race_chunk, z)
             else:
                 ensure_runs(runs, runner, pool, tasks, k, budget, log_fn)    # 라운드의 전략 전체를 한 번에
                 active = list(pool)
@@ -425,14 +449,27 @@ def run_search(runner, teacher, seeds, tasks, cfg: SearchConfig, log_fn=None, ca
 
 
 def confirm(runner, cands, baseline, tasks_select, tasks_test, k, budget, log_fn=None,
-            cache: Runs | None = None) -> dict:
+            cache: Runs | None = None, top: int = 3, search_stats: dict[str, Stat] | None = None,
+            skip_margin: float = 0.05) -> dict:
     """선택 과제로 후보 중 승자를 고르고, 테스트 과제에서 기준 전략과 짝지어 비교한다.
     기준 전략은 선택 과제에서 쓰이지 않으므로 돌리지 않는다."""
+    if search_stats and len(cands) > top:     # 탐색 성적 상위 top개만 선택 과제에서 확인 (기준 전략은 별도)
+        ranked = sorted(cands, key=lambda s: (-search_stats[s.sid].succ, search_stats[s.sid].cost)
+                        if s.sid in search_stats else (1, math.inf))
+        cands = [s for s in ranked if s.sid != baseline.sid][:top] or ranked[:top]
     runs: Runs = restrict(cache, tasks_select) if cache else {}
     ensure_runs(runs, runner, cands, tasks_select, k, budget, log_fn)
     stats = {s.sid: summarize(runs, s.sid, tasks_select, k) for s in cands}
     winner = max(cands, key=lambda s: (stats[s.sid].succ, -stats[s.sid].cost))
     print(f"[confirm] 선택 과제 승자: {winner.sid} succ={stats[winner.sid].succ:.3f}", flush=True)
+
+    base = search_stats.get(baseline.sid) if search_stats else None
+    if base and stats[winner.sid].succ + skip_margin < base.succ:
+        # 선택 과제 승자가 탐색 때 기준 전략 성적에도 못 미치면 테스트 비용을 쓰지 않는다 (과제 집합이 달라 보수적으로 margin)
+        print("[confirm] 승자가 기준 전략보다 낮아 테스트 생략", flush=True)
+        return {"winner": asdict(winner), "test_skipped": True,
+                "select_winner": asdict(stats[winner.sid]), "search_baseline": asdict(base),
+                "beats_baseline": False}
 
     test: Runs = restrict(cache, tasks_test) if cache else {}
     ensure_runs(test, runner, [winner, baseline], tasks_test, k, budget, log_fn)
