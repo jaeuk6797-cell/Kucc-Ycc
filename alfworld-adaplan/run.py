@@ -350,9 +350,59 @@ def report(args) -> None:
     save_report(args, text)
 
 
+def table(args) -> None:
+    """과제별 전체 표 (API 호출 없음). 화면에 출력하고 results/table_*.csv로 저장한다. O=성공 X=실패 -=아직 없음."""
+    import csv
+    cache, _ = load_cache(args.cache)
+    sigs = {signature(args, s): s.sid for s in (BASELINE, ADAPT)}
+    R: dict[tuple[str, int, int], dict] = {}
+    for (sid, t, rep, sig), r in cache.items():
+        if sigs.get(sig) == sid:
+            R[(sid, t, rep)] = r
+    tasks = sorted({t for (_, t, _) in R})
+    if not tasks:
+        print("현재 코드 버전의 결과가 캐시에 없습니다.")
+        return
+    reps = max(rep for (_, _, rep) in R) + 1
+    mark = lambda sid, t, rep: "-" if (sid, t, rep) not in R else ("O" if R[(sid, t, rep)]["success"] else "X")   # noqa: E731
+    def rate(sid, t):
+        v = [int(R[(sid, t, rep)]["success"]) for rep in range(reps) if (sid, t, rep) in R]
+        return sum(v) / len(v) if v else None
+    head = ["task", "유형"] + [f"기준{r + 1}" for r in range(reps)] + [f"ADaPT{r + 1}" for r in range(reps)] + \
+           [f"확장{r + 1}" for r in range(reps)] + ["기준평균", "ADaPT평균", "차이"]
+    rows = []
+    for t in tasks:
+        tt = next((R[k].get("ttype") for k in R if k[1] == t), "?")
+        rb, ra = rate(BASELINE.sid, t), rate(ADAPT.sid, t)
+        exp = [str(R[(ADAPT.sid, t, rep)]["expansions"]) if (ADAPT.sid, t, rep) in R else "-" for rep in range(reps)]
+        rows.append([t, tt] + [mark(BASELINE.sid, t, r) for r in range(reps)] + [mark(ADAPT.sid, t, r) for r in range(reps)] + exp +
+                    ["" if rb is None else f"{rb:.2f}", "" if ra is None else f"{ra:.2f}",
+                     "" if rb is None or ra is None else f"{ra - rb:+.2f}"])
+    widths = [max(len(str(x)) for x in col) for col in zip(head, *rows)]
+    line = lambda r: "  ".join(str(x).ljust(w) for x, w in zip(r, widths))                                     # noqa: E731
+    print(line(head))
+    for r in rows:
+        print(line(r))
+    both = [(rate(BASELINE.sid, t), rate(ADAPT.sid, t)) for t in tasks]
+    both = [(b, a) for b, a in both if b is not None and a is not None]
+    if both:
+        print(f"\n과제 {len(both)}개: 기준 평균 {sum(b for b, _ in both) / len(both):.1%}, "
+              f"ADaPT 평균 {sum(a for _, a in both) / len(both):.1%}, "
+              f"ADaPT가 더 나은 과제 {sum(a > b for b, a in both)}개, 같은 과제 {sum(a == b for b, a in both)}개, "
+              f"기준이 더 나은 과제 {sum(a < b for b, a in both)}개")
+    out_dir = os.path.join(args.out_dir, "results")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:      # utf-8-sig: 엑셀에서 한글이 안 깨지게
+        w = csv.writer(f)
+        w.writerow(head)
+        w.writerows(rows)
+    print(f"[저장] {path}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report"])
+    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report", "table"])
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--model", default="claude-haiku-5-5")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"])
@@ -389,6 +439,9 @@ def main() -> None:
         return
     if args.cmd == "report":
         report(args)
+        return
+    if args.cmd == "table":
+        table(args)
         return
 
     cache_path = None if args.mock else args.cache
