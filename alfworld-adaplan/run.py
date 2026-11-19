@@ -267,6 +267,16 @@ def summarize(args, tasks, strategies, res, ttypes) -> None:
         exp = [res[ADAPT.sid][k].expansions for k in both]
         fired = sum(1 for e in exp if e > 0)
         print(f"\nADaPT 확장이 한 번이라도 발동한 에피소드: {fired}/{len(exp)}")
+        # 확장 발동 여부별 분해. 확장이 없으면 ADaPT도 기준과 같은 정책이라, 그 구간의 차이는 실행 간 흔들림(잡음)의 크기다.
+        # (주의: 확장 여부는 ADaPT 실행 결과에 따라 정해지므로 보조 진단일 뿐, 효과 추정이 아니다.)
+        print("\n확장 발동 여부별 (쌍 수 / 기준 성공 / ADaPT 성공 / ADaPT만 성공 / 기준만 성공):")
+        for label, flag in (("확장 발동   ", True), ("확장 발동 안 함", False)):
+            ks = [k for k in both if (res[ADAPT.sid][k].expansions > 0) == flag]
+            bs = [int(res[BASELINE.sid][k].success) for k in ks]
+            as_ = [int(res[ADAPT.sid][k].success) for k in ks]
+            only_a = sum(1 for x, y in zip(bs, as_) if (x, y) == (0, 1))
+            only_b = sum(1 for x, y in zip(bs, as_) if (x, y) == (1, 0))
+            print(f"  {label:<10} {len(ks):>4} / {sum(bs):>4} / {sum(as_):>4} / {only_a:>3} / {only_b:>3}")
     if args.cmd == "pilot" and res[BASELINE.sid]:
         rs = list(res[BASELINE.sid].values())
         mean = sum(r.cost_usd for r in rs) / len(rs)
