@@ -250,9 +250,37 @@ def save_report(args, text: str, extra: str = "") -> str | None:
     return path
 
 
+def report(args) -> None:
+    """API 호출 없이 results_cache.jsonl에서 현재 코드 버전의 결과를 다시 요약한다 (중단된 실행, 이어서 한 실행 포함)."""
+    cache, _ = load_cache(args.cache)
+    strategies = [BASELINE, ADAPT]
+    sigs = {signature(args, s): s for s in strategies}
+    res: dict[str, dict[tuple[int, int], Trial]] = {s.sid: {} for s in strategies}
+    ttypes: dict[int, str] = {}
+    for (sid, t, rep, sig), r in cache.items():
+        if sig in sigs and sigs[sig].sid == sid:
+            res[sid][(t, rep)] = Trial(**{k: r[k] for k in Trial.__dataclass_fields__ if k in r})
+            ttypes[t] = r.get("ttype", "?")
+    keys = sorted(set(res[BASELINE.sid]) & set(res[ADAPT.sid]))       # 두 전략 모두 끝난 (task, rep)만
+    if not keys:
+        print("현재 코드 버전(CODE_VERSION=%s)·설정의 결과가 캐시에 없습니다." % CODE_VERSION)
+        return
+    args.n = len({t for t, _ in keys})
+    args.reps = max(rep for _, rep in keys) + 1
+    for sid in res:
+        res[sid] = {k: v for k, v in res[sid].items() if k in set(keys)}
+    tasks = sorted({t for t, _ in keys})
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        summarize(args, tasks, strategies, res, ttypes)
+    text = buf.getvalue()
+    print(text, end="")
+    save_report(args, text)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["pilot", "compare", "show"])
+    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report"])
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--model", default="claude-haiku-5-5")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"])
@@ -274,6 +302,9 @@ def main() -> None:
 
     if args.cmd == "show":
         show(args)
+        return
+    if args.cmd == "report":
+        report(args)
         return
 
     cache_path = None if args.mock else args.cache
