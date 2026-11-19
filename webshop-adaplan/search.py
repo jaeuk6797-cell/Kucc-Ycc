@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import re
 from dataclasses import asdict, dataclass, replace
@@ -24,14 +25,34 @@ from llm import LLM
 class TaskRunner:
     """(전략, 과제, 반복 번호) 하나를 실행한다. 과제 = WebShop 세션 번호."""
 
-    def __init__(self, env, llm_factory, cfg: RunConfig):
+    def __init__(self, env, llm_factory, cfg: RunConfig, cache_path: str | None = None):
         self.env = env
         self.llm_factory = llm_factory      # seed -> LLM (가짜 LLM은 seed로 재현성 확보)
         self.cfg = cfg
+        # 결과 캐시: (전략 설정, 과제, 반복)별 결과를 파일에 남겨 중단 후 재시작해도 같은 실행을 다시 돈 돈을 쓰지 않는다
+        self.cache_path = cache_path
+        self.cache: dict[str, dict] = {}
+        if cache_path and os.path.exists(cache_path):
+            with open(cache_path, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        row = json.loads(line)
+                        self.cache[row.pop("_key")] = row
+
+    def _key(self, s: Strategy, task: int, rep: int) -> str:
+        return hashlib.md5(f"{s.key()}|{task}|{rep}|{self.cfg}".encode()).hexdigest()
 
     def run(self, s: Strategy, task: int, rep: int) -> Trial:
+        key = self._key(s, task, rep)
+        if key in self.cache:
+            return Trial(**self.cache[key])
         seed = int(hashlib.md5(f"{s.key()}|{task}|{rep}".encode()).hexdigest()[:8], 16)
-        return run_episode(self.env, self.llm_factory(seed), s, task, self.cfg)
+        trial = run_episode(self.env, self.llm_factory(seed), s, task, self.cfg)
+        if self.cache_path:
+            self.cache[key] = asdict(trial)
+            with open(self.cache_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"_key": key, **asdict(trial)}) + "\n")
+        return trial
 
 
 # ---------------------------------------------------------------- 예산, 통계, 선택
