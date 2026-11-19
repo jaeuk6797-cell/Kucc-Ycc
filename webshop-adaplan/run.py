@@ -4,6 +4,10 @@
   python run.py difficulty --tasks 1500:1600 --k 3    # 5단계 난이도 표 만들기
   python run.py search     --search 1500:1560 --select 1560:1590 --test 0:50
                                                       # 전략 탐색 + 기준 전략과 비교
+  python run.py pilot      --tasks 0:8                # 에피소드당 비용 실측 + 예산 내 가능 횟수 견적 (먼저 이것부터)
+
+비용 보호: --budget(USD, 기본 27)의 --stop-frac(기본 0.7)에 닿으면 자동으로 멈춘다.
+호출별 토큰은 --cost-log(기본 cost_calls.jsonl), 결과 캐시는 --cache(기본 results_cache.jsonl)에 남는다.
 
 --mock 을 붙이면 가짜 쇼핑몰 + 가짜 LLM으로 돈다 (설치 없이 코드 흐름 확인용).
 실제 실행 예:
@@ -18,6 +22,7 @@ import json
 from dataclasses import asdict
 
 from agent import RunConfig, Strategy, run_episode
+from cost import METER, BudgetExceeded
 from difficulty import assign_tiers, spearman
 from search import (Budget, LLMTeacher, RandomEditTeacher, SearchConfig, TaskRunner, confirm,
                     run_search)
@@ -57,7 +62,7 @@ def build(args):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["episode", "difficulty", "search"])
+    ap.add_argument("cmd", choices=["episode", "difficulty", "search", "pilot"])
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic",
                     help="anthropic: Claude API / openai: vLLM 등 OpenAI 형식 서버")
@@ -72,6 +77,11 @@ def main() -> None:
     ap.add_argument("--teacher-base-url", default=None)
     ap.add_argument("--num-products", type=int, default=None)
     ap.add_argument("--max-steps", type=int, default=20)
+    ap.add_argument("--budget", type=float, default=27.0, help="총 예산 (USD)")
+    ap.add_argument("--stop-frac", type=float, default=0.7,
+                    help="예산의 이 비율에 닿으면 멈춤 (나머지는 재실행 예비)")
+    ap.add_argument("--cost-log", default="cost_calls.jsonl", help="호출별 토큰·비용 로그")
+    ap.add_argument("--cache", default="results_cache.jsonl", help="결과 캐시 (재시작 시 같은 실행 건너뜀)")
     ap.add_argument("--success-threshold", type=float, default=1.0)
     ap.add_argument("--temperature", type=float, default=0.7)
     # episode
@@ -89,12 +99,35 @@ def main() -> None:
     ap.add_argument("--confirm-k", type=int, default=2)
     args = ap.parse_args()
 
+    METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
+    METER.log_path = None if args.mock else args.cost_log
     env, factory, teacher_llm, cfg = build(args)
-    runner = TaskRunner(env, factory, cfg)
+    runner = TaskRunner(env, factory, cfg, cache_path=None if args.mock else args.cache)
+    try:
+        dispatch(args, env, factory, teacher_llm, cfg, runner)
+    except BudgetExceeded as e:
+        print(f"[예산 보호] 실험 중단: {e}\n결과는 로그/캐시에 저장돼 있으니 --cache 그대로 다시 실행하면 이어서 진행합니다.")
+    finally:
+        print("[비용]", METER.summary())
+
+
+def dispatch(args, env, factory, teacher_llm, cfg, runner) -> None:
 
     if args.cmd == "episode":
         s = Strategy(sid="demo")
         print(json.dumps(asdict(run_episode(env, factory(0), s, args.session, cfg)), indent=2))
+
+    elif args.cmd == "pilot":
+        costs = []
+        for t in task_range(args.tasks):
+            tr = run_episode(env, factory(t), Strategy(sid="pilot"), t, cfg)
+            costs.append(tr.cost_usd)
+            print(f"task {t}: 성공={tr.success} 스텝={tr.steps} 입력={tr.in_tokens:,} "
+                  f"출력={tr.out_tokens:,} 비용=${tr.cost_usd:.4f}")
+        mean = sum(costs) / len(costs)
+        usable = args.budget * args.stop_frac
+        print(f"\n에피소드당 평균 ${mean:.4f} -> 예산 ${args.budget}의 {args.stop_frac:.0%}(${usable:.2f}) "
+              f"내 약 {int(usable / mean) if mean else 0}회 가능")
 
     elif args.cmd == "difficulty":
         tasks = task_range(args.tasks)

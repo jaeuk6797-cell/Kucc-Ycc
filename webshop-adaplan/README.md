@@ -14,6 +14,7 @@ AdaPlan-H식 계층 계획에 "막히면 계획을 더 나누는" 확장을 붙�
 | `search.py` | 전략 탐색(파레토 선택, 교사 편집, 예산), 기준 전략과 신뢰구간 비교 |
 | `run.py` | 실행 진입점 |
 | `report.py` | 결과(trials.jsonl)를 표와 그래프로 정리 |
+| `cost.py` | API 비용 계량(입력/출력/캐시 토큰)과 예산 보호 |
 
 ## 설치 없이 확인 (가짜 환경)
 
@@ -42,6 +43,19 @@ python run.py search --search 1500:1560 --select 1560:1590 --test 0:50
 
 Claude 모델은 temperature를 바꿀 수 없어 `--temperature`가 무시됩니다. 생각 깊이는 `--effort`(에이전트)와
 `--teacher-effort`(교사)로 조절합니다.
+
+## 비용 관리 (최소 비용으로 돌리기)
+
+```bash
+python run.py pilot --tasks 0:8 --model claude-haiku-5-5   # 먼저: 에피소드당 비용 실측과 가능 횟수 견적
+python run.py search ... --budget 27 --stop-frac 0.7        # 예산의 70%에 닿으면 자동 중단
+```
+
+- 호출마다 입력/출력/캐시 토큰과 비용을 `cost_calls.jsonl`에 남기고, 에피소드 기록(`trials.jsonl`)에도 `in_tokens`, `out_tokens`, `cost_usd`가 들어갑니다.
+- 결과 캐시(`results_cache.jsonl`): 중단 후 같은 명령을 다시 실행하면 끝난 (전략, 과제, 반복)은 건너뜁니다.
+- Claude 호출은 `max_tokens` 4096(생각 토큰 포함), 시스템 프롬프트와 지시문·계획 부분에 prompt caching을 씁니다.
+- 100K 토큰을 넘는 프롬프트는 단가가 5배라 횟수를 세어 `[비용]` 줄에 표시합니다.
+- 단가는 `cost.py`의 `PRICES`에서 고칩니다.
 
 ## 결과 보기 (표 + 그래프)
 

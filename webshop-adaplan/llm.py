@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
+from cost import METER
+
 
 @dataclass(frozen=True)
 class Reply:
@@ -58,6 +60,8 @@ class OpenAICompatLLM:
         text = r.choices[0].message.content or ""
         u = r.usage
         tokens = u.prompt_tokens + u.completion_tokens if u else (len(system) + len(user) + len(text)) // 4
+        if u:
+            METER.add("local", role, u.prompt_tokens, u.completion_tokens)
         return Reply(text, tokens)
 
 
@@ -72,20 +76,31 @@ class AnthropicLLM:
     # 거절(refusal) 시 서버가 다른 모델로 다시 실행하는 기능을 지원하는 모델
     FALLBACK_MODELS = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5", "claude-fable-5-1"}
 
-    def __init__(self, model: str = "claude-opus-5-5", effort: str = "low", max_tokens: int = 16000):
+    def __init__(self, model: str = "claude-opus-5-5", effort: str = "low", max_tokens: int = 4096):
         import anthropic   # 실제 실행할 때만 필요하므로 여기서 불러온다
 
         self.client = anthropic.Anthropic()
         self.model = model
         self.effort = effort
-        self.max_tokens = max_tokens   # 생각 토큰도 여기에 포함되므로 넉넉하게
+        self.max_tokens = max_tokens   # 생각 토큰도 여기에 포함. 비용 상한을 위해 4096으로 제한
+
+    @staticmethod
+    def _content(user: str):
+        """고정 앞부분(지시문+계획)을 캐시 블록으로 분리. 최소 길이 미만이면 서버가 캐시하지 않아 추가 비용은 없다."""
+        marker = "# Recent history"
+        if marker in user:
+            head, tail = user.split(marker, 1)
+            return [{"type": "text", "text": head, "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": marker + tail}]
+        return user
 
     def chat(self, role: str, system: str, user: str, temperature: float = 0.0) -> Reply:
+        METER.check()   # 예산 한도(기본 70%)에 닿았으면 여기서 멈춘다
         kwargs = dict(
             model=self.model,
             max_tokens=self.max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": self._content(user)}],
             output_config={"effort": self.effort},
         )
         if self.model in self.FALLBACK_MODELS:
@@ -96,7 +111,11 @@ class AnthropicLLM:
 
         text = "" if r.stop_reason == "refusal" else \
             "".join(b.text for b in r.content if b.type == "text")
-        return Reply(text, r.usage.input_tokens + r.usage.output_tokens)
+        u = r.usage
+        METER.add(self.model, role, u.input_tokens, u.output_tokens,
+                  getattr(u, "cache_read_input_tokens", 0) or 0,
+                  getattr(u, "cache_creation_input_tokens", 0) or 0)
+        return Reply(text, u.input_tokens + u.output_tokens)
 
 
 # ---------------------------------------------------------------- 가짜 LLM (테스트용)

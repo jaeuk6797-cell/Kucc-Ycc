@@ -18,6 +18,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from cost import METER
 from llm import LLM
 
 
@@ -47,6 +48,9 @@ class Trial:
     steps: int          # 실제로 고른 행동 수 (무효 행동 포함)
     expansions: int     # 계획 확장 횟수
     seconds: float
+    in_tokens: int = 0    # 비용 계량기 기준 입력 토큰 (캐시 포함)
+    out_tokens: int = 0   # 출력 토큰 (생각 토큰 포함)
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -167,6 +171,7 @@ class RunConfig:
 
 def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Trial:
     t0 = time.time()
+    meter0 = METER.snapshot()
     obs, instruction = env.reset(session)
     plan = Plan()
     tokens = 0
@@ -218,5 +223,7 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
             expansions += 1
             marks.clear()
 
+    d_in, d_out, d_cost = METER.delta(meter0)
     return Trial(success=reward >= cfg.success_threshold, reward=reward, tokens=tokens,
-                 steps=steps, expansions=expansions, seconds=round(time.time() - t0, 3))
+                 steps=steps, expansions=expansions, seconds=round(time.time() - t0, 3),
+                 in_tokens=d_in, out_tokens=d_out, cost_usd=round(d_cost, 6))
