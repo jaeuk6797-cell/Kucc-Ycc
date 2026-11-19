@@ -13,6 +13,7 @@ agent 결과는 단계를 매기는 데 쓰지 않고, 이 단계가 실제 성�
 
   python difficulty.py features                    # 과제별 속성 표(difficulty_features.csv) 만들기 (API 불필요)
   python difficulty.py analyze --cache results_cache.jsonl   # 단계별 성공률 + 순위상관 + 전략 간 일치도
+  python difficulty.py compare-tiers --cache results_cache.jsonl   # agent 비의존 단계 vs 기존 agent 의존(확장 횟수) 단계 비교
 """
 
 from __future__ import annotations
@@ -123,9 +124,60 @@ def analyze(features_csv: str, cache_path: str) -> None:
         print("  난이도 속성이 두 전략 모두에서 같은 방향의 상관을 보이면 특정 agent에 종속되지 않는다는 근거가 된다.")
 
 
+def agent_tier(rows: list[dict]) -> int:
+    """기존 방식(webshop-adaplan/difficulty.py)과 같은 규칙: 확장 없이 성공=1, 1번 확장 후=2, 2번=3, 3번 이상=4, 과반 실패=5."""
+    ok = [r for r in rows if r["success"]]
+    if len(ok) * 2 <= len(rows):
+        return 5
+    ex = sorted(r["expansions"] for r in ok)
+    med = ex[len(ex) // 2] if len(ex) % 2 else (ex[len(ex) // 2 - 1] + ex[len(ex) // 2]) / 2
+    return 1 + min(3, int(round(med)))
+
+
+def compare_tiers(features_csv: str, cache_path: str, ref_sid: str, other_sid: str) -> None:
+    feats = {int(r["task"]): r for r in csv.DictReader(open(features_csv, encoding="utf-8"))}
+    by: dict[str, dict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for line in open(cache_path, encoding="utf-8"):
+        if line.strip():
+            r = json.loads(line)
+            by[r["sid"]][r["task"]].append(r)
+    ref, other = by.get(ref_sid, {}), by.get(other_sid, {})
+    tasks = sorted(t for t in ref if t in feats)
+    if not tasks:
+        print(f"{ref_sid} 결과가 없습니다.")
+        return
+    static = [int(feats[t]["tier"]) for t in tasks]
+    agent = [agent_tier(ref[t]) for t in tasks]
+    print(f"기준 전략(agent 의존 단계 산출용): {ref_sid}, 과제 {len(tasks)}개")
+    print("agent 의존 단계 분포:", {i: agent.count(i) for i in range(1, 6)})
+    print("agent 비의존 단계 분포:", {i: static.count(i) for i in range(1, 6)})
+
+    print("\n교차표 (행: agent 비의존 단계, 열: agent 의존 단계)")
+    print("          " + "".join(f"  A{j}" for j in range(1, 6)))
+    for i in range(1, 6):
+        print(f"  S{i}     " + "".join(f"{sum(1 for s, a in zip(static, agent) if s == i and a == j):>4}" for j in range(1, 6)))
+    same = sum(s == a for s, a in zip(static, agent)) / len(tasks)
+    near = sum(abs(s - a) <= 1 for s, a in zip(static, agent)) / len(tasks)
+    print(f"\n두 단계의 순위상관 = {spearman(static, agent):+.2f}   같은 단계 {same:.0%}, 1단계 이내 {near:.0%}")
+
+    fail_ref = [1 - sum(r["success"] for r in ref[t]) / len(ref[t]) for t in tasks]
+    print(f"\n{ref_sid} 실패율과의 상관: 비의존 단계 {spearman(static, fail_ref):+.2f}, 의존 단계 {spearman(agent, fail_ref):+.2f}"
+          "  (의존 단계는 이 결과로 만든 것이라 높게 나오는 게 당연한 순환)")
+    common = [t for t in tasks if t in other]
+    if common:
+        fail_other = [1 - sum(r["success"] for r in other[t]) / len(other[t]) for t in common]
+        st = [int(feats[t]["tier"]) for t in common]
+        ag = [agent_tier(ref[t]) for t in common]
+        print(f"다른 전략({other_sid}) 실패율과의 상관(순환 없음): 비의존 단계 {spearman(st, fail_other):+.2f}, "
+              f"의존 단계 {spearman(ag, fail_other):+.2f}")
+        print("  -> 의존 단계가 다른 agent의 실패를 덜 설명하면, agent 의존 난이도가 그 agent에 묶여 있다는 증거")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["features", "analyze"])
+    ap.add_argument("cmd", choices=["features", "analyze", "compare-tiers"])
+    ap.add_argument("--ref-sid", default="adaplan_M3_adapt", help="agent 의존 단계를 만들 기준 전략")
+    ap.add_argument("--other-sid", default="adaplan_M3", help="교차 검증용 다른 전략")
     ap.add_argument("--split", default="eval_out_of_distribution")
     ap.add_argument("--features", default="difficulty_features.csv")
     ap.add_argument("--cache", default="results_cache.jsonl")
@@ -137,5 +189,7 @@ if __name__ == "__main__":
             tc[r["tier"]] += 1
         print(f"{len(rows)}개 과제 속성 저장: {a.features}")
         print("단계별 과제 수:", dict(sorted(tc.items())))
-    else:
+    elif a.cmd == "analyze":
         analyze(a.features, a.cache)
+    else:
+        compare_tiers(a.features, a.cache, a.ref_sid, a.other_sid)
