@@ -54,10 +54,13 @@
 - 환경을 WebShop → ALFWorld로 전환 (PR #2), 하니스·비용 계량·난이도 분석(`difficulty.py`) 구축
 - Python 3.11 venv + WSL2로 ALFWorld 설치, `test_core.py` 4개 통과
 
-## 2. 다음 할 일
+## 2. 방침 (2026-11-19 사용자 결정)
+- 목표는 엄밀한 비교 설계가 아니라 **ADaPT 효용의 크기**를 아는 것. 난이도 티어 분석과 반복(reps)은 생략하고, 134개 task × 1회 짝 비교의 성공률 차이(95% 구간)만 본다.
+
+## 3. 다음 할 일
 - [ ] task 10 목표 문장 확인 (cup vs mug)
 - [x] 프롬프트 개선 (물체 이름 고정 / 미방문 장소 목록)
 - [x] 병렬 실행 `--workers` 추가 (WSL에서 `--workers 3` 동작 확인 필요)
 - [ ] 개선 효과 확인: 같은 5개 task × 2 reps로 `compare` 재실행 후 task 10, 66 `show`
-- [ ] 본 실험: `compare --n 134` → `difficulty.py compare-tiers`
+- [ ] 본 실험: `compare --n 134 --workers 3` (티어 분석은 선택)
 - [ ] 멘토 피드백 항목 정리 (동적 K, 팁 생성 베이스라인, 한 문장 주장, Condition B 설명 수정)
