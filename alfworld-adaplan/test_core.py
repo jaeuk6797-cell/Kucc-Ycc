@@ -142,6 +142,24 @@ def test_process_pool_matches_serial():
     assert os.getcwd() == cwd and par == serial
 
 
+def test_private_tmp_cleanup():
+    import os, tempfile
+    old = tempfile.tempdir
+    d = run.use_private_tmp("alfw_test_")
+    try:
+        for i in range(4):
+            p = os.path.join(d, f"tmp{i}")
+            os.makedirs(p)
+            os.utime(p, (1000 + i, 1000 + i))
+        run.cleanup_tmp(keep=1)
+        assert sorted(os.listdir(d)) == ["tmp3"]
+    finally:
+        tempfile.tempdir = old
+        run.TMP_WORK = None
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

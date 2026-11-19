@@ -24,6 +24,8 @@ import contextlib
 import io
 import subprocess
 import multiprocessing as mp
+import atexit
+import shutil
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
@@ -136,6 +138,38 @@ def load_cache(path):
     return cache, spent
 
 
+
+class DiskFull(RuntimeError):
+    pass
+
+
+TMP_WORK: str | None = None      # ALFWorld가 임시 파일(libdownward.so 복사본 등)을 쌓는 전용 폴더
+
+
+def use_private_tmp(prefix: str) -> str:
+    """임시 파일을 이 프로세스 전용 폴더로 모으고, 종료 시 지운다. (ALFWorld는 환경을 만들 때마다 임시 폴더를 남긴다)"""
+    global TMP_WORK
+    d = tempfile.mkdtemp(prefix=prefix)
+    tempfile.tempdir = d
+    os.environ["TMPDIR"] = d
+    TMP_WORK = d
+    atexit.register(shutil.rmtree, d, True)
+    return d
+
+
+def cleanup_tmp(keep: int = 1) -> None:
+    """에피소드가 끝날 때마다 전용 폴더의 낡은 임시 폴더를 지운다 (가장 최근 keep개만 남김)."""
+    if not TMP_WORK:
+        return
+    try:
+        subs = sorted((os.path.join(TMP_WORK, x) for x in os.listdir(TMP_WORK) if x.startswith("tmp")),
+                      key=os.path.getmtime)
+        for p in subs[:-keep] if keep else subs:
+            shutil.rmtree(p, ignore_errors=True)
+    except OSError:
+        pass
+
+
 STRATS = {x.sid: x for x in (BASELINE, ADAPT)}
 _W: dict = {}          # 작업 프로세스가 쓰는 환경/LLM/설정
 
@@ -161,6 +195,8 @@ def run_job(env, llm_for, cfg, args, t, rep, sids):
             raise
         except Exception as ex:          # API 오류 등: 이 에피소드만 건너뜀 (캐시에 안 남아 다음 실행에서 재시도)
             out.append((sid, None, f"{type(ex).__name__}: {ex}"))
+        finally:
+            cleanup_tmp()
     return t, rep, out
 
 
@@ -170,7 +206,7 @@ def worker_init(args, shared):
     import envs  # noqa: F401  (폴더를 옮기기 전에 import)
     if os.environ.get("ADAPLAN_FAKE_ENV"):
         import test_core  # noqa: F401
-    os.chdir(tempfile.mkdtemp(prefix="alfw_"))
+    os.chdir(use_private_tmp("alfw_"))
     METER.shared = shared
     METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
     METER.log_path = None if args.mock else args.cost_log
@@ -330,6 +366,8 @@ def main() -> None:
     METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
     METER.cost = spent                      # 재시작해도 지금까지 쓴 비용을 이어서 센다
     METER.log_path = None if args.mock else args.cost_log
+    if args.workers <= 1:
+        use_private_tmp("alfw_main_")
     env = make_env(args)
     llm_for = make_llm_for(args)
     cfg = RunConfig(max_steps=args.max_steps)
@@ -356,6 +394,8 @@ def main() -> None:
     def handle(t, rep, out):
         for sid, row, err in out:
             if err is not None:
+                if "No space left" in err:         # 디스크가 찼으면 나머지도 전부 실패하므로 즉시 멈춘다
+                    raise DiskFull(err)
                 failed.append((sid, t, rep))
                 print(f"[오류] {sid} task {t} rep {rep}: {err}", flush=True)
                 continue
@@ -391,6 +431,8 @@ def main() -> None:
                 handle(*fut.result())          # BudgetExceeded는 여기서 올라온다
     except BudgetExceeded as e:
         print(f"[예산 보호] 중단: {e}\n같은 명령을 다시 실행하면 캐시된 결과는 건너뛰고 이어서 진행합니다.")
+    except DiskFull as e:
+        print(f"[디스크 부족] 중단: {e}\n공간을 확보한 뒤 같은 명령을 다시 실행하면 이어서 진행합니다.")
     finally:
         if ex is not None:
             ex.shutdown(wait=True, cancel_futures=True)
