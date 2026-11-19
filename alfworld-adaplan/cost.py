@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 
 LONG_THRESHOLD = 100_000   # 이 길이를 넘는 프롬프트는 전체가 비싼 단가
@@ -47,7 +48,8 @@ class CostMeter:
     calls: int = 0
     over_100k: int = 0
     log_path: str | None = None
-    _snap: dict = field(default_factory=dict, repr=False)
+    _lock: object = field(default_factory=threading.Lock, repr=False)
+    _tl: object = field(default_factory=threading.local, repr=False)   # 스레드별 누적(에피소드 비용 계산용)
 
     def check(self) -> None:
         """호출 직전에 부른다. 예산 한도에 닿았으면 멈춘다."""
@@ -59,23 +61,30 @@ class CostMeter:
     def add(self, model: str, role: str, in_tok: int, out_tok: int,
             cache_read: int = 0, cache_write: int = 0) -> float:
         c = call_cost(model, in_tok, out_tok, cache_read, cache_write)
-        self.in_tokens += in_tok
-        self.out_tokens += out_tok
-        self.cache_read += cache_read
-        self.cache_write += cache_write
-        self.cost += c
-        self.calls += 1
         long_prompt = in_tok + cache_read + cache_write > LONG_THRESHOLD
-        self.over_100k += long_prompt
-        if self.log_path:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"model": model, "role": role, "in": in_tok, "out": out_tok,
-                                    "cache_read": cache_read, "cache_write": cache_write,
-                                    "cost": round(c, 6), "over_100k": long_prompt}) + "\n")
+        tl = self._tl
+        tl.inp = getattr(tl, "inp", 0) + in_tok + cache_read + cache_write
+        tl.out = getattr(tl, "out", 0) + out_tok
+        tl.cost = getattr(tl, "cost", 0.0) + c
+        with self._lock:
+            self.in_tokens += in_tok
+            self.out_tokens += out_tok
+            self.cache_read += cache_read
+            self.cache_write += cache_write
+            self.cost += c
+            self.calls += 1
+            self.over_100k += long_prompt
+            if self.log_path:
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"model": model, "role": role, "in": in_tok, "out": out_tok,
+                                        "cache_read": cache_read, "cache_write": cache_write,
+                                        "cost": round(c, 6), "over_100k": long_prompt}) + "\n")
         return c
 
     def snapshot(self) -> tuple[int, int, float]:
-        return self.in_tokens + self.cache_read + self.cache_write, self.out_tokens, self.cost
+        """이 스레드가 지금까지 쓴 (입력, 출력, 비용). 병렬 실행에서도 에피소드 비용이 섞이지 않는다."""
+        tl = self._tl
+        return getattr(tl, "inp", 0), getattr(tl, "out", 0), getattr(tl, "cost", 0.0)
 
     def delta(self, before: tuple[int, int, float]) -> tuple[int, int, float]:
         now = self.snapshot()

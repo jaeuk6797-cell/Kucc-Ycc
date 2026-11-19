@@ -81,7 +81,9 @@ ALF_GUIDE = (
     "'use <lamp>' to turn on a lamp, and 'examine <obj>'. You can carry only one object at a time. "
     "Objects are usually inside closed receptacles such as drawers, cabinets, fridge, so search "
     "unexplored places one by one. Clean/heat/cool must be done at the sinkbasin/microwave/fridge "
-    "while holding the object."
+    "while holding the object. Object names matter: use the exact object type named in the task "
+    "(for example 'cup' and 'mug' are different objects, so never substitute a similar-looking "
+    "object for the one asked for)."
 )
 
 PLAN_SYSTEM = (
@@ -94,6 +96,8 @@ PLAN_SYSTEM = (
 REFINE_SYSTEM = (
     "You are a planner for a household text-game agent. The agent got stuck on one step of its plan. "
     "Break that single step into 2-4 smaller concrete sub-steps based on the current situation. "
+    "If the target object has not been found yet, the sub-steps must go to places from the "
+    "'Not yet visited' list instead of revisiting places or repeating earlier actions. "
     + ALF_GUIDE + " Write only numbered lines in the form 'Step k: ...'."
 )
 
@@ -209,8 +213,11 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
         stuck = sum(marks[-2 * s.trigger_n:]) if s.trigger_n else 0
         if (not done and s.trigger_n and stuck >= s.trigger_n and expansions < s.max_expand):
             visited = sorted({a[6:] for a, _ in history if a.lower().startswith("go to ")})
+            places = {c[6:] for c in avail.get("commands", []) if c.lower().startswith("go to ")}
+            unvisited = sorted(places - set(visited))
             note = (f"The agent is stuck on step {step_no}.\n"
                     f"Places already visited: {', '.join(visited) or '(none)'}.\n"
+                    f"Not yet visited: {', '.join(unvisited) or '(none)'}.\n"
                     f"Last actions:\n" +
                     "\n".join(f"> {a} -> {o[:100]}" for a, o in history[-6:]))
             add_level = s.scope == "global" or (s.scope == "hybrid" and len(plan.levels) < s.max_level)

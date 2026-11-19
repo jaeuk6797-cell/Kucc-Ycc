@@ -66,6 +66,58 @@ def test_expansion_and_trace():
     assert base.expansions == 0 and base.steps == 30
 
 
+class RecordLLM(StuckLLM):
+    def __init__(self):
+        self.refine_prompts = []
+
+    def chat(self, role, system, user, temperature=0.0):
+        if role == "refine":
+            self.refine_prompts.append(user)
+        return super().chat(role, system, user, temperature)
+
+
+def test_refine_note_lists_unvisited_places():
+    class Env(FakeEnv):
+        def available(self):
+            return {"commands": ["look", "go to cabinet 1", "go to desk 2"]}
+    llm = RecordLLM()
+    run_episode(Env(), llm, run.ADAPT, 0, RunConfig(max_steps=12))
+    assert llm.refine_prompts, "막혀서 분해가 한 번은 불려야 함"
+    assert "Not yet visited: cabinet 1, desk 2" in llm.refine_prompts[0]
+
+
+def test_meter_per_thread_and_total():
+    import threading
+    from cost import CostMeter
+    m = CostMeter(budget_usd=100)
+    got = {}
+
+    def work(i):
+        b = m.snapshot()
+        for _ in range(50):
+            m.add("claude-haiku-5-5", "act", 1000, 100)
+        got[i] = m.delta(b)
+
+    ts = [threading.Thread(target=work, args=(i,)) for i in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    one = 50 * (1000 * 0.10 + 100 * 0.50) / 1e6
+    assert all(abs(d[2] - one) < 1e-9 and d[0] == 50_000 and d[1] == 5_000 for d in got.values())
+    assert m.calls == 200 and abs(m.cost - 4 * one) < 1e-9
+
+
+def test_parallel_runs_match_serial():
+    from concurrent.futures import ThreadPoolExecutor
+    class Env(FakeEnv):
+        pass
+    def one(i):
+        return run_episode(Env(), StuckLLM(), run.ADAPT, i, RunConfig(max_steps=20)).steps
+    serial = [one(i) for i in range(6)]
+    with ThreadPoolExecutor(3) as ex:
+        par = list(ex.map(one, range(6)))
+    assert serial == par
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

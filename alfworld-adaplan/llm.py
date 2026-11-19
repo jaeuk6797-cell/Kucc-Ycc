@@ -79,7 +79,7 @@ class AnthropicLLM:
     def __init__(self, model: str = "claude-opus-5-5", effort: str = "low", max_tokens: int = 4096):
         import anthropic   # 실제 실행할 때만 필요하므로 여기서 불러온다
 
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(max_retries=6)   # 병렬 실행 시 429/529 대비
         self.model = model
         self.effort = effort
         self.max_tokens = max_tokens   # 생각 토큰도 여기에 포함. 비용 상한을 위해 4096으로 제한

@@ -23,6 +23,8 @@ import traceback
 import contextlib
 import io
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from collections import defaultdict
 from dataclasses import asdict
@@ -38,7 +40,9 @@ M = CFG["M_values"][0]   # 3
 BASELINE = Strategy(sid="adaplan_M3", start_level=M, max_level=M, trigger_n=0)
 ADAPT = Strategy(sid="adaplan_M3_adapt", start_level=M, max_level=M, trigger_n=3,
                  max_expand=4, scope="local")
-CODE_VERSION = "2"   # 에이전트 프롬프트/막힘 규칙을 바꾸면 올려서 예전 캐시를 무효화한다
+CODE_VERSION = "3"   # 에이전트 프롬프트/막힘 규칙을 바꾸면 올려서 예전 캐시를 무효화한다
+
+_CACHE_LOCK = threading.Lock()
 
 
 class RandomLLM:
@@ -106,6 +110,20 @@ def build(args):
     return env, llm_for
 
 
+def make_env_getter(args, main_env):
+    """스레드마다 자기 환경 인스턴스를 쓴다(환경은 스레드 간 공유 불가). workers=1이면 기존 환경을 그대로 쓴다."""
+    if args.workers <= 1:
+        return lambda: main_env
+    from envs import ALFWorldEnv
+    tl = threading.local()
+
+    def get():
+        if not hasattr(tl, "env"):
+            tl.env = ALFWorldEnv(split=args.split)
+        return tl.env
+    return get
+
+
 def pick_tasks(num_games: int, n: int, seed: int) -> list[int]:
     """과제 순서가 유형별로 뭉쳐 있어서, 고정 시드로 무작위 추출해 유형이 섞이게 한다."""
     return sorted(random.Random(seed).sample(range(num_games), min(n, num_games)))
@@ -139,10 +157,11 @@ def run_one(env, llm_for, strat, task, rep, cfg, args, cache, cache_path):
     tr = run_episode(env, llm_for(task * 1000 + rep), strat, task, cfg)
     row = {"sid": strat.sid, "task": task, "rep": rep, "sig": sig, "ttype": env.task_type(task),
            "ts": time.time(), **asdict(tr)}
-    cache[key] = row
-    if cache_path:
-        with open(cache_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+    with _CACHE_LOCK:
+        cache[key] = row
+        if cache_path:
+            with open(cache_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
     return tr, False
 
 
@@ -247,6 +266,7 @@ def main() -> None:
     ap.add_argument("--stop-frac", type=float, default=CFG["stop_frac"])
     ap.add_argument("--cost-log", default="cost_calls.jsonl")
     ap.add_argument("--cache", default="results_cache.jsonl")
+    ap.add_argument("--workers", type=int, default=1, help="동시에 돌릴 에피소드 수 (권장 3~4, API 속도 제한 주의)")
     ap.add_argument("--push", action="store_true", help="결과 파일을 git commit + push (실패해도 무시)")
     ap.add_argument("--task", type=int, default=None, help="show: 과제 번호")
     ap.add_argument("--sid", default=None, help="show: 전략 이름")
@@ -270,30 +290,44 @@ def main() -> None:
     total, done_n, failed, t_start = len(tasks) * args.reps * len(strategies), 0, [], time.time()
     if spent:
         print(f"[예산] 이전 실행까지 누적 ${spent:.4f} 사용 (한도 ${args.budget * args.stop_frac:.2f})")
+    get_env = make_env_getter(args, env)
+
+    def job(t, rep):
+        """과제 하나(같은 rep)에서 두 전략을 연달아 돌린다. 중단돼도 짝이 맞는다."""
+        e, out = get_env(), []
+        for s in strategies:
+            try:
+                tr, cached = run_one(e, llm_for, s, t, rep, cfg, args, cache, cache_path)
+                out.append((s, tr, cached, None))
+            except BudgetExceeded:
+                raise
+            except Exception as ex:      # API 오류 등: 이 에피소드만 건너뜀 (캐시에 안 남아 다음 실행에서 재시도)
+                out.append((s, None, False, ex))
+        return t, rep, out
+
+    jobs = [(t, rep) for t in tasks for rep in range(args.reps)]
+    ex = ThreadPoolExecutor(max_workers=max(1, args.workers))
     try:
-        for t in tasks:                       # 과제 단위로 두 전략을 번갈아 돌려 중단돼도 짝이 맞게 한다
-            for rep in range(args.reps):
-                for s in strategies:
-                    try:
-                        tr, cached = run_one(env, llm_for, s, t, rep, cfg, args, cache, cache_path)
-                    except BudgetExceeded:
-                        raise
-                    except Exception as e:     # API 오류 등: 이 에피소드만 건너뛰고 계속 (캐시에 안 남아 다음 실행에서 재시도)
-                        failed.append((s.sid, t, rep))
-                        print(f"[오류] {s.sid} task {t} rep {rep}: {type(e).__name__}: {e}", flush=True)
-                        traceback.print_exc(limit=2)
-                        continue
-                    res[s.sid][(t, rep)] = tr
-                    done_n += 1
-                    el = time.time() - t_start
-                    eta = el / max(done_n, 1) * (total - done_n)
-                    print(f"[{done_n}/{total}{' 캐시' if cached else ''}] {s.sid} task {t}({ttypes[t]}): "
-                          f"성공={tr.success} 스텝={tr.steps} 확장={tr.expansions} "
-                          f"입력={tr.in_tokens:,} 출력={tr.out_tokens:,} 비용=${tr.cost_usd:.4f} "
-                          f"| 누적 ${METER.cost:.3f} | 남은 약 {eta/60:.0f}분", flush=True)
+        futs = [ex.submit(job, t, rep) for t, rep in jobs]
+        for fut in as_completed(futs):
+            t, rep, out = fut.result()       # BudgetExceeded는 여기서 올라온다
+            for s, tr, cached, err in out:
+                if err is not None:
+                    failed.append((s.sid, t, rep))
+                    print(f"[오류] {s.sid} task {t} rep {rep}: {type(err).__name__}: {err}", flush=True)
+                    continue
+                res[s.sid][(t, rep)] = tr
+                done_n += 1
+                el = time.time() - t_start
+                eta = el / max(done_n, 1) * (total - done_n)
+                print(f"[{done_n}/{total}{' 캐시' if cached else ''}] {s.sid} task {t}({ttypes[t]}): "
+                      f"성공={tr.success} 스텝={tr.steps} 확장={tr.expansions} "
+                      f"입력={tr.in_tokens:,} 출력={tr.out_tokens:,} 비용=${tr.cost_usd:.4f} "
+                      f"| 누적 ${METER.cost:.3f} | 남은 약 {eta/60:.0f}분", flush=True)
     except BudgetExceeded as e:
         print(f"[예산 보호] 중단: {e}\n같은 명령을 다시 실행하면 캐시된 결과는 건너뛰고 이어서 진행합니다.")
     finally:
+        ex.shutdown(wait=True, cancel_futures=True)
         print("[비용]", METER.summary())
     if failed:
         print(f"[주의] 오류로 건너뛴 에피소드 {len(failed)}개 (같은 명령으로 다시 실행하면 재시도): {failed[:5]}")
