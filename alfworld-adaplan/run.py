@@ -406,8 +406,8 @@ def main() -> None:
     def handle(t, rep, out):
         for sid, row, err in out:
             if err is not None:
-                if "No space left" in err:         # 디스크가 찼으면 나머지도 전부 실패하므로 즉시 멈춘다
-                    raise DiskFull(err)
+                if "No space left" in err or "AuthenticationError" in err or "PermissionDenied" in err:
+                    raise DiskFull(err)            # 디스크 부족·키 오류는 나머지도 전부 실패하므로 즉시 멈춘다
                 failed.append((sid, t, rep))
                 print(f"[오류] {sid} task {t} rep {rep}: {err}", flush=True)
                 continue
@@ -444,7 +444,7 @@ def main() -> None:
     except BudgetExceeded as e:
         print(f"[예산 보호] 중단: {e}\n같은 명령을 다시 실행하면 캐시된 결과는 건너뛰고 이어서 진행합니다.")
     except DiskFull as e:
-        print(f"[디스크 부족] 중단: {e}\n공간을 확보한 뒤 같은 명령을 다시 실행하면 이어서 진행합니다.")
+        print(f"[치명적 오류] 중단: {e}\n디스크 공간(No space) 또는 API 키(Authentication) 문제입니다. 해결한 뒤 같은 명령을 다시 실행하면 이어서 진행합니다.")
     finally:
         if ex is not None:
             ex.shutdown(wait=True, cancel_futures=True)
