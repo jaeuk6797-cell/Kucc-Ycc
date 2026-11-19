@@ -1,8 +1,10 @@
 {
   "environment": "alfworld",
-  "M_values": [1, 2, 3, 5, 7],
+  "M_values": [
+    3
+  ],
   "K": 1,
   "budget_usd": 27,
   "stop_frac": 0.7,
-  "note": "M sweep only (K fixed at 1). K rollouts were identical at temperature 0, so K cannot be measured with this setup."
+  "note": "M fixed at 3, K fixed at 1. K rollouts were identical at temperature 0, so K cannot be measured with this setup."
 }
