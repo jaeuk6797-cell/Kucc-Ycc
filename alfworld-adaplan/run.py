@@ -267,8 +267,9 @@ def summarize(args, tasks, strategies, res, ttypes) -> None:
         exp = [res[ADAPT.sid][k].expansions for k in both]
         fired = sum(1 for e in exp if e > 0)
         print(f"\nADaPT 확장이 한 번이라도 발동한 에피소드: {fired}/{len(exp)}")
-        # 확장 발동 여부별 분해. 확장이 없으면 ADaPT도 기준과 같은 정책이라, 그 구간의 차이는 실행 간 흔들림(잡음)의 크기다.
-        # (주의: 확장 여부는 ADaPT 실행 결과에 따라 정해지므로 보조 진단일 뿐, 효과 추정이 아니다.)
+        # 확장 발동 여부별 분해. 주의: 확장 여부는 ADaPT 실행이 막혔는지에 따라 정해지는 결과 변수라서,
+        # "확장 없음" 구간은 ADaPT가 잘 풀린 실행만 남는 선택 편향이 있다. 잡음 크기나 효과 추정으로 쓸 수 없고 참고용이다.
+        # 잡음 크기는 같은 전략을 두 번 돌린 결과(아래 '같은 전략 재실행 일치도')로 잰다.
         print("\n확장 발동 여부별 (쌍 수 / 기준 성공 / ADaPT 성공 / ADaPT만 성공 / 기준만 성공):")
         for label, flag in (("확장 발동   ", True), ("확장 발동 안 함", False)):
             ks = [k for k in both if (res[ADAPT.sid][k].expansions > 0) == flag]
@@ -277,6 +278,13 @@ def summarize(args, tasks, strategies, res, ttypes) -> None:
             only_a = sum(1 for x, y in zip(bs, as_) if (x, y) == (0, 1))
             only_b = sum(1 for x, y in zip(bs, as_) if (x, y) == (1, 0))
             print(f"  {label:<10} {len(ks):>4} / {sum(bs):>4} / {sum(as_):>4} / {only_a:>3} / {only_b:>3}")
+    for s in strategies:                      # 같은 전략을 같은 과제에 두 번 돌렸을 때 결과가 얼마나 갈리는가 = 실행 간 잡음
+        rp = [(int(res[s.sid][(t, 0)].success), int(res[s.sid][(t, 1)].success))
+              for t in tasks if (t, 0) in res[s.sid] and (t, 1) in res[s.sid]]
+        if len(rp) >= 10:
+            diff = sum(1 for a, b in rp if a != b)
+            print(f"\n같은 전략 재실행 일치도 {s.sid}: {len(rp)}개 과제 중 두 실행의 성공 여부가 다른 것 {diff}개 ({diff/len(rp):.0%})"
+                  f" [1회차만 성공 {sum(1 for a, b in rp if (a, b) == (1, 0))}, 2회차만 성공 {sum(1 for a, b in rp if (a, b) == (0, 1))}]")
     if args.cmd == "pilot" and res[BASELINE.sid]:
         rs = list(res[BASELINE.sid].values())
         mean = sum(r.cost_usd for r in rs) / len(rs)
