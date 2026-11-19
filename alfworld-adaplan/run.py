@@ -20,6 +20,10 @@ import os
 import random
 import time
 import traceback
+import contextlib
+import io
+import subprocess
+from datetime import datetime
 from collections import defaultdict
 from dataclasses import asdict
 
@@ -198,6 +202,35 @@ def summarize(args, tasks, strategies, res, ttypes) -> None:
             print(f"예산 ${args.budget}의 {args.stop_frac:.0%}(${usable:.2f}) 내 약 {int(usable/mean)} 에피소드 가능")
 
 
+def save_report(args, text: str, extra: str = "") -> str | None:
+    """요약을 results/ 아래 마크다운으로 저장하고, --push면 커밋·푸시를 시도한다 (실패해도 실험은 영향 없음)."""
+    if args.mock:
+        return None
+    here = os.path.dirname(os.path.abspath(__file__))
+    out_dir = os.path.join(here, "results")
+    os.makedirs(out_dir, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(out_dir, f"{args.cmd}_{stamp}_n{args.n}_r{args.reps}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# {args.cmd} 결과 ({stamp})\n\n"
+                f"명령: n={args.n} reps={args.reps} seed={args.seed} split={args.split} model={args.model}\n\n"
+                f"```\n{text.strip()}\n```\n{extra}")
+    print(f"[저장] {path}")
+    if getattr(args, "push", False):
+        try:
+            rel = os.path.relpath(path, here)
+            cache_rel = os.path.relpath(os.path.abspath(args.cache), here)
+            targets = [rel] + ([cache_rel] if os.path.exists(os.path.abspath(args.cache)) else [])
+            subprocess.run(["git", "add", *targets], cwd=here, check=True, timeout=60)
+            subprocess.run(["git", "commit", "-m", f"results: {args.cmd} n={args.n} reps={args.reps} ({stamp})"],
+                           cwd=here, check=True, timeout=60)
+            subprocess.run(["git", "push"], cwd=here, check=True, timeout=120)
+            print("[푸시] 완료")
+        except Exception as e:  # 인증 실패 등. 파일은 남아 있으니 나중에 수동 push
+            print(f"[푸시 실패] {type(e).__name__}: {e}  (결과 파일은 저장됨)")
+    return path
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["pilot", "compare", "show"])
@@ -214,6 +247,7 @@ def main() -> None:
     ap.add_argument("--stop-frac", type=float, default=CFG["stop_frac"])
     ap.add_argument("--cost-log", default="cost_calls.jsonl")
     ap.add_argument("--cache", default="results_cache.jsonl")
+    ap.add_argument("--push", action="store_true", help="결과 파일을 git commit + push (실패해도 무시)")
     ap.add_argument("--task", type=int, default=None, help="show: 과제 번호")
     ap.add_argument("--sid", default=None, help="show: 전략 이름")
     args = ap.parse_args()
@@ -263,7 +297,12 @@ def main() -> None:
         print("[비용]", METER.summary())
     if failed:
         print(f"[주의] 오류로 건너뛴 에피소드 {len(failed)}개 (같은 명령으로 다시 실행하면 재시도): {failed[:5]}")
-    summarize(args, tasks, strategies, res, ttypes)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        summarize(args, tasks, strategies, res, ttypes)
+    text = buf.getvalue()
+    print(text, end="")
+    save_report(args, text, f"\n비용: {METER.summary()}\n")
 
 
 if __name__ == "__main__":
