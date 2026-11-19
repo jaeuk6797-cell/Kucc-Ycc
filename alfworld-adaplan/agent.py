@@ -33,11 +33,14 @@ class Strategy:
     max_expand: int = 4           # 에피소드당 최대 확장 횟수
     scope: str = "hybrid"         # global / local / hybrid
     rules: tuple[str, ...] = ()   # 계획 프롬프트에 붙일 규칙 (교사가 추가/삭제)
+    hint: bool = True             # 확장할 때 "아직 안 간 장소" 목록을 알려 줄지 (False면 힌트 없음: 분리 실험용)
 
     def key(self) -> tuple:
-        """sid를 뺀 실제 설정값. 같은 내용의 전략을 중복으로 보지 않기 위해 쓴다."""
-        return (self.start_level, self.max_level, self.trigger_n, self.max_expand,
-                self.scope, self.rules)
+        """sid를 뺀 실제 설정값. 같은 내용의 전략을 중복으로 보지 않기 위해 쓴다.
+        hint는 기본값(True)이면 키에 넣지 않아, 이미 쌓인 캐시(기존 전략)의 서명이 바뀌지 않는다."""
+        k = (self.start_level, self.max_level, self.trigger_n, self.max_expand,
+             self.scope, self.rules)
+        return k if self.hint else k + ("nohint",)
 
 
 @dataclass(frozen=True)
@@ -132,11 +135,15 @@ def make_level(llm: LLM, instruction: str, plan: Plan, rules: tuple[str, ...],
     return r.tokens
 
 
-def refine_step(llm: LLM, instruction: str, plan: Plan, step_no: int, note: str) -> int:
-    """막힌 단계 하나를 하위 단계로 나눈다."""
+_HINT_SENTENCE = ("If the target object has not been found yet, the sub-steps must go to places from the "
+                  "'Not yet visited' list instead of revisiting places or repeating earlier actions. ")
+
+
+def refine_step(llm: LLM, instruction: str, plan: Plan, step_no: int, note: str, hint: bool = True) -> int:
+    """막힌 단계 하나를 하위 단계로 나눈다. hint=False면 '미방문 장소' 지시문도 뺀다(분리 실험)."""
     user = (f"# Instruction\n{instruction}\n# Plan\n{plan.render()}\n"
             f"# Stuck step\nStep {step_no}\n# Situation\n{note}\n# Sub-steps for step {step_no}")
-    r = llm.chat("refine", REFINE_SYSTEM, user)
+    r = llm.chat("refine", REFINE_SYSTEM if hint else REFINE_SYSTEM.replace(_HINT_SENTENCE, ""), user)
     plan.local[step_no] = _steps(r.text)
     return r.tokens
 
@@ -217,14 +224,14 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
             unvisited = sorted(places - set(visited))
             note = (f"The agent is stuck on step {step_no}.\n"
                     f"Places already visited: {', '.join(visited) or '(none)'}.\n"
-                    f"Not yet visited: {', '.join(unvisited) or '(none)'}.\n"
+                    + (f"Not yet visited: {', '.join(unvisited) or '(none)'}.\n" if s.hint else "") +
                     f"Last actions:\n" +
                     "\n".join(f"> {a} -> {o[:100]}" for a, o in history[-6:]))
             add_level = s.scope == "global" or (s.scope == "hybrid" and len(plan.levels) < s.max_level)
             if add_level and len(plan.levels) < s.max_level:
                 tokens += make_level(llm, instruction, plan, s.rules, note)
             elif s.scope in ("local", "hybrid"):
-                tokens += refine_step(llm, instruction, plan, step_no, note)
+                tokens += refine_step(llm, instruction, plan, step_no, note, s.hint)
             else:
                 continue          # global인데 이미 최대 레벨: 더 확장할 수 없음
             expansions += 1

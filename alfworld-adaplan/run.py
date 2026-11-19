@@ -43,6 +43,15 @@ M = CFG["M_values"][0]   # 3
 BASELINE = Strategy(sid="adaplan_M3", start_level=M, max_level=M, trigger_n=0)
 ADAPT = Strategy(sid="adaplan_M3_adapt", start_level=M, max_level=M, trigger_n=3,
                  max_expand=4, scope="local")
+# 비교군(분리 실험). 기존 두 전략의 서명은 그대로라 쌓인 캐시를 계속 쓴다.
+#  - M 스윕: 계획 깊이 M을 1/2/5로 바꾼 기준 전략 (M=3은 위 BASELINE)
+#  - adaplan_M1_adapt: M을 대충(1) 정하고 막힐 때만 국소 분해 -> "M 튜닝 없이도 되는가"
+#  - adaplan_M3_adapt_nohint: 미방문 장소 힌트를 뺀 ADaPT -> 힌트의 몫을 분리
+EXTRA = [Strategy(sid=f"adaplan_M{m}", start_level=m, max_level=m, trigger_n=0) for m in (1, 2, 5)] + [
+    Strategy(sid="adaplan_M1_adapt", start_level=1, max_level=1, trigger_n=3, max_expand=4, scope="local"),
+    Strategy(sid="adaplan_M3_adapt_nohint", start_level=M, max_level=M, trigger_n=3, max_expand=4,
+             scope="local", hint=False),
+]
 CODE_VERSION = "4"   # 에이전트 프롬프트/막힘 규칙을 바꾸면 올려서 예전 캐시를 무효화한다
 
 class RandomLLM:
@@ -172,7 +181,7 @@ def cleanup_tmp(keep: int = 1) -> None:
         pass
 
 
-STRATS = {x.sid: x for x in (BASELINE, ADAPT)}
+STRATS = {x.sid: x for x in (BASELINE, ADAPT, *EXTRA)}
 _W: dict = {}          # 작업 프로세스가 쓰는 환경/LLM/설정
 
 
@@ -249,7 +258,7 @@ def summarize(args, tasks, strategies, res, ttypes) -> None:
         print(f"{s.sid}: 성공 {k}/{len(rs)} = {k/len(rs):.0%} (95% 윌슨 {lo:.0%}–{hi:.0%}), "
               f"평균 스텝 {sum(r.steps for r in rs)/len(rs):.1f}, 평균 확장 {sum(r.expansions for r in rs)/len(rs):.2f}, "
               f"에피소드당 ${cost/len(rs):.4f}, 성공당 ${cost/k if k else float('inf'):.4f}")
-    if len(strategies) == 2:
+    if len(strategies) >= 2 and strategies[0] is BASELINE and strategies[1] is ADAPT:
         both = [k for k in keys if k in res[BASELINE.sid] and k in res[ADAPT.sid]]
         pairs = [(int(res[BASELINE.sid][k].success), int(res[ADAPT.sid][k].success)) for k in both]
         b = sum(1 for p in pairs if p == (0, 1))
@@ -320,6 +329,62 @@ def save_report(args, text: str, extra: str = "") -> str | None:
         except Exception as e:  # 인증 실패 등. 파일은 남아 있으니 나중에 수동 push
             print(f"[푸시 실패] {type(e).__name__}: {e}  (결과 파일은 저장됨)")
     return path
+
+
+def extra_arms(args) -> list:
+    if not args.arms:
+        return []
+    names = [x.sid for x in EXTRA] if args.arms == "all" else [x.strip() for x in args.arms.split(",") if x.strip()]
+    bad = [n for n in names if n not in STRATS]
+    if bad:
+        raise SystemExit(f"알 수 없는 전략: {bad}. 가능: {[x.sid for x in EXTRA]}")
+    return [STRATS[n] for n in names if n not in (BASELINE.sid, ADAPT.sid)]
+
+
+def task_boot(diffs: dict, iters: int = 5000, seed: int = 0):
+    """과제별 평균 차이의 과제 단위 부트스트랩 (같은 과제의 반복은 묶어서 한 단위로 본다)."""
+    tasks = sorted(diffs)
+    means = [sum(diffs[t]) / len(diffs[t]) for t in tasks]
+    rng = random.Random(seed)
+    bs = sorted(sum(rng.choice(means) for _ in means) / len(means) for _ in range(iters))
+    return sum(means) / len(means), bs[int(0.025 * iters)], bs[int(0.975 * iters) - 1]
+
+
+def ablate(args) -> None:
+    """API 호출 없이 캐시에서 모든 전략을 기준(adaplan_M3)·ADaPT와 과제 단위로 비교한다."""
+    cache, _ = load_cache(args.cache)
+    arms = [BASELINE, ADAPT] + [x for x in EXTRA if not args.arms or args.arms == "all" or x.sid in args.arms.split(",")]
+    sigs = {signature(args, s): s for s in arms}
+    res = {s.sid: {} for s in arms}
+    for (sid, t, rep, sig), r in cache.items():
+        if sig in sigs and sigs[sig].sid == sid:
+            res[sid][(t, rep)] = int(r["success"])
+    done = [k for v in res.values() for k in v]
+    if done:
+        args.n, args.reps = len({t for t, _ in done}), max(rep for _, rep in done) + 1     # 결과 파일 이름용
+    lines = [f"\n전략 비교 (split={args.split}, 과제 단위 평균, 과제 부트스트랩 95%)",
+             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}   vs adaplan_M3 (공통 과제·회차)      vs adaplan_M3_adapt"]
+    def cmp(a, b):
+        ks = sorted(set(res[a]) & set(res[b]))
+        diffs = defaultdict(list)
+        for t, rep in ks:
+            diffs[t].append(res[a][(t, rep)] - res[b][(t, rep)])
+        if len(diffs) < 5:
+            return "      -"
+        d, lo, hi = task_boot(diffs)
+        return f"{d:+6.1%}p [{lo:+.1%}, {hi:+.1%}] n={len(ks)}"
+    for s in arms:
+        rs = res[s.sid]
+        if not rs:
+            lines.append(f"{s.sid:<26}{0:>8}")
+            continue
+        rate = sum(rs.values()) / len(rs)
+        base = "" if s is BASELINE else cmp(s.sid, BASELINE.sid)
+        adp = "" if s is ADAPT else cmp(s.sid, ADAPT.sid)
+        lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}   {base:<36}{adp}")
+    text = "\n".join(lines) + "\n"
+    print(text)
+    save_report(args, text, "")
 
 
 def report(args) -> None:
@@ -402,7 +467,7 @@ def table(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report", "table"])
+    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report", "table", "ablate"])
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--model", default="claude-haiku-5-5")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"])
@@ -420,6 +485,8 @@ def main() -> None:
                     help="결과(results/), 캐시, 비용 로그를 모을 폴더. 환경변수 ADAPLAN_OUT으로도 지정 (예: /mnt/d/kucc)")
     ap.add_argument("--tmp-root", default=os.environ.get("ADAPLAN_TMP"),
                     help="ALFWorld 임시 파일을 쌓을 폴더. 환경변수 ADAPLAN_TMP으로도 지정 (예: /mnt/d/kucc_tmp)")
+    ap.add_argument("--arms", default=None,
+                    help="compare/ablate: 추가로 돌릴 전략 이름(쉼표). 예: adaplan_M1,adaplan_M2. 'all'이면 비교군 전부")
     ap.add_argument("--workers", type=int, default=1, help="동시에 돌릴 작업 프로세스 수 (권장 3, API 속도 제한 주의)")
     ap.add_argument("--push", action="store_true", help="결과 파일을 git commit + push (실패해도 무시)")
     ap.add_argument("--task", type=int, default=None, help="show: 과제 번호")
@@ -443,6 +510,9 @@ def main() -> None:
     if args.cmd == "table":
         table(args)
         return
+    if args.cmd == "ablate":
+        ablate(args)
+        return
 
     cache_path = None if args.mock else args.cache
     cache, spent = load_cache(cache_path)
@@ -456,7 +526,7 @@ def main() -> None:
     cfg = RunConfig(max_steps=args.max_steps)
     tasks = pick_tasks(env.num_games, args.n, args.seed)
     ttypes = {t: env.task_type(t) for t in tasks}
-    strategies = [BASELINE] if args.cmd == "pilot" else [BASELINE, ADAPT]
+    strategies = [BASELINE] if args.cmd == "pilot" else [BASELINE, ADAPT] + extra_arms(args)
     res: dict[str, dict[tuple[int, int], Trial]] = {s.sid: {} for s in strategies}
     total, done_n, failed, t_start = len(tasks) * args.reps * len(strategies), 0, [], time.time()
     if spent:

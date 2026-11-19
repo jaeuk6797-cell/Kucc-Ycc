@@ -160,6 +160,70 @@ def test_private_tmp_cleanup():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_existing_signatures_unchanged_by_hint_field():
+    """hint 필드를 추가해도 기존 두 전략의 캐시 서명은 그대로여야 쌓인 결과를 쓸 수 있다."""
+    import hashlib, json
+    a = SimpleNamespace(model="m", effort="low", split="s", max_steps=40, mock=False)
+    for s in (run.BASELINE, run.ADAPT):
+        old_key = (s.start_level, s.max_level, s.trigger_n, s.max_expand, s.scope, s.rules)
+        raw = json.dumps({"model": "m", "effort": "low", "split": "s", "max_steps": 40, "code": run.CODE_VERSION,
+                          "strategy": old_key}, sort_keys=True, default=str)
+        assert run.signature(a, s) == hashlib.md5(raw.encode()).hexdigest()[:10]
+    sigs = {run.signature(a, s) for s in (run.BASELINE, run.ADAPT, *run.EXTRA)}
+    assert len(sigs) == 2 + len(run.EXTRA)       # 비교군마다 서명이 다름
+
+
+def test_nohint_arm_omits_unvisited_and_instruction():
+    class Env(FakeEnv):
+        def available(self):
+            return {"commands": ["look", "go to cabinet 1", "go to desk 2"]}
+
+    class SysLLM(RecordLLM):
+        def __init__(self):
+            super().__init__()
+            self.refine_systems = []
+
+        def chat(self, role, system, user, temperature=0.0):
+            if role == "refine":
+                self.refine_systems.append(system)
+            return super().chat(role, system, user, temperature)
+    nh = next(s for s in run.EXTRA if s.sid == "adaplan_M3_adapt_nohint")
+    llm = SysLLM()
+    run_episode(Env(), llm, nh, 0, RunConfig(max_steps=12))
+    assert llm.refine_prompts and "Not yet visited" not in llm.refine_prompts[0]
+    assert "Not yet visited" not in llm.refine_systems[0]
+    llm2 = SysLLM()
+    run_episode(Env(), llm2, run.ADAPT, 0, RunConfig(max_steps=12))
+    assert "Not yet visited" in llm2.refine_systems[0]
+
+
+def test_m_sweep_plan_depth():
+    """start_level이 실제로 계획 깊이를 바꾼다 (M=1/2/5 기준은 확장 없이 그 깊이로 시작)."""
+    for m in (1, 2, 5):
+        s = next(x for x in run.EXTRA if x.sid == f"adaplan_M{m}")
+        tr = run_episode(FakeEnv(), StuckLLM(), s, 0, RunConfig(max_steps=6))
+        assert tr.plan.count("<plan ") == m and tr.expansions == 0
+    m1a = next(x for x in run.EXTRA if x.sid == "adaplan_M1_adapt")
+    tr = run_episode(FakeEnv(), StuckLLM(), m1a, 0, RunConfig(max_steps=20))
+    assert tr.plan.count("<plan ") == 1 and tr.expansions > 0
+
+
+def test_ablate_runs_from_cache(tmp_path, capsys):
+    import json
+    cache = tmp_path / "c.jsonl"
+    a = SimpleNamespace(model="m", effort="low", split="s", max_steps=40, mock=False, cache=str(cache),
+                        arms="all", n=6, reps=1, cmd="ablate", out_dir=str(tmp_path), seed=0, push=False)
+    rows = []
+    for t in range(6):
+        for s in (run.BASELINE, run.ADAPT, *run.EXTRA):
+            rows.append({"sid": s.sid, "task": t, "rep": 0, "sig": run.signature(a, s),
+                         "success": (s.trigger_n > 0 and t % 2 == 0) or t == 5, "cost_usd": 0.0})
+    cache.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    run.ablate(a)
+    out = capsys.readouterr().out
+    assert "adaplan_M1_adapt" in out and "adaplan_M3_adapt_nohint" in out and "+" in out
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
