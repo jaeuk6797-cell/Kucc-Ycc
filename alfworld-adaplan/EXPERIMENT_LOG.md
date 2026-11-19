@@ -23,6 +23,7 @@
   - ADaPT만 성공 9, 기준만 성공 4, McNemar p=0.267, 차이 +7.5%p (부트스트랩 -3.0%~+17.9%)
   - 에피소드당 $0.0035 / $0.0037, 성공당 $0.0045 / $0.0043, 평균 스텝 17.6 / 17.2, ADaPT 확장 발동 19/67
   - 유형별(기준/ADaPT/쌍): look_at 10/10/10, pick_and_place 10/11/11, clean 11/12/16, cool 8/9/10, heat 13/14/18, pick_two 1/2/2
+- 저장 위치: `--out-dir`(결과 `results/`·`results_cache.jsonl`·`cost_calls.jsonl`)와 `--tmp-root`(ALFWorld 임시 파일) 옵션 추가, 환경변수 `ADAPLAN_OUT`, `ADAPLAN_TMP`로도 지정 가능. 사용자 요청으로 D 드라이브(`/mnt/d/...`)에 쌓기
 - WSL에서 `--push`는 git 사용자 정보 없음으로 실패(결과 파일은 저장됨). WSL에서는 `--push`를 쓰지 않고 Windows에서 커밋
 
 ### 2026-11-19 (5) 프로세스 병렬 + 개선 프롬프트로 5 tasks × 2 reps (코드 버전 4, 20 에피소드, 누적 $0.2821)

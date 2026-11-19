@@ -146,10 +146,12 @@ class DiskFull(RuntimeError):
 TMP_WORK: str | None = None      # ALFWorld가 임시 파일(libdownward.so 복사본 등)을 쌓는 전용 폴더
 
 
-def use_private_tmp(prefix: str) -> str:
+def use_private_tmp(prefix: str, root: str | None = None) -> str:
     """임시 파일을 이 프로세스 전용 폴더로 모으고, 종료 시 지운다. (ALFWorld는 환경을 만들 때마다 임시 폴더를 남긴다)"""
     global TMP_WORK
-    d = tempfile.mkdtemp(prefix=prefix)
+    if root:
+        os.makedirs(root, exist_ok=True)
+    d = tempfile.mkdtemp(prefix=prefix, dir=root or None)
     tempfile.tempdir = d
     os.environ["TMPDIR"] = d
     TMP_WORK = d
@@ -206,7 +208,7 @@ def worker_init(args, shared):
     import envs  # noqa: F401  (폴더를 옮기기 전에 import)
     if os.environ.get("ADAPLAN_FAKE_ENV"):
         import test_core  # noqa: F401
-    os.chdir(use_private_tmp("alfw_"))
+    os.chdir(use_private_tmp("alfw_", getattr(args, "tmp_root", None)))
     METER.shared = shared
     METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
     METER.log_path = None if args.mock else args.cost_log
@@ -278,7 +280,7 @@ def save_report(args, text: str, extra: str = "") -> str | None:
     if args.mock:
         return None
     here = os.path.dirname(os.path.abspath(__file__))
-    out_dir = os.path.join(here, "results")
+    out_dir = os.path.join(getattr(args, "out_dir", None) or here, "results")
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(out_dir, f"{args.cmd}_{stamp}_n{args.n}_r{args.reps}.md")
@@ -344,13 +346,25 @@ def main() -> None:
     ap.add_argument("--max-steps", type=int, default=40)
     ap.add_argument("--budget", type=float, default=CFG["budget_usd"])
     ap.add_argument("--stop-frac", type=float, default=CFG["stop_frac"])
-    ap.add_argument("--cost-log", default="cost_calls.jsonl")
-    ap.add_argument("--cache", default="results_cache.jsonl")
+    ap.add_argument("--cost-log", default=None, help="기본: <out-dir>/cost_calls.jsonl")
+    ap.add_argument("--cache", default=None, help="기본: <out-dir>/results_cache.jsonl")
+    ap.add_argument("--out-dir", default=os.environ.get("ADAPLAN_OUT"),
+                    help="결과(results/), 캐시, 비용 로그를 모을 폴더. 환경변수 ADAPLAN_OUT으로도 지정 (예: /mnt/d/kucc)")
+    ap.add_argument("--tmp-root", default=os.environ.get("ADAPLAN_TMP"),
+                    help="ALFWorld 임시 파일을 쌓을 폴더. 환경변수 ADAPLAN_TMP으로도 지정 (예: /mnt/d/kucc_tmp)")
     ap.add_argument("--workers", type=int, default=1, help="동시에 돌릴 작업 프로세스 수 (권장 3, API 속도 제한 주의)")
     ap.add_argument("--push", action="store_true", help="결과 파일을 git commit + push (실패해도 무시)")
     ap.add_argument("--task", type=int, default=None, help="show: 과제 번호")
     ap.add_argument("--sid", default=None, help="show: 전략 이름")
     args = ap.parse_args()
+    out = os.path.abspath(args.out_dir) if args.out_dir else HERE
+    if args.out_dir:
+        os.makedirs(out, exist_ok=True)
+    args.out_dir = out
+    args.cache = os.path.abspath(args.cache or os.path.join(out, "results_cache.jsonl"))
+    args.cost_log = os.path.abspath(args.cost_log or os.path.join(out, "cost_calls.jsonl"))
+    if args.tmp_root:
+        args.tmp_root = os.path.abspath(args.tmp_root)
 
     if args.cmd == "show":
         show(args)
@@ -359,15 +373,13 @@ def main() -> None:
         report(args)
         return
 
-    args.cache = os.path.abspath(args.cache)             # 작업 프로세스가 폴더를 옮겨도 경로가 유지되게
-    args.cost_log = os.path.abspath(args.cost_log)
     cache_path = None if args.mock else args.cache
     cache, spent = load_cache(cache_path)
     METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
     METER.cost = spent                      # 재시작해도 지금까지 쓴 비용을 이어서 센다
     METER.log_path = None if args.mock else args.cost_log
     if args.workers <= 1:
-        use_private_tmp("alfw_main_")
+        use_private_tmp("alfw_main_", getattr(args, "tmp_root", None))
     env = make_env(args)
     llm_for = make_llm_for(args)
     cfg = RunConfig(max_steps=args.max_steps)
