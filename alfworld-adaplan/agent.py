@@ -51,6 +51,8 @@ class Trial:
     in_tokens: int = 0    # 비용 계량기 기준 입력 토큰 (캐시 포함)
     out_tokens: int = 0   # 출력 토큰 (생각 토큰 포함)
     cost_usd: float = 0.0
+    traj: list = field(default_factory=list)   # 스텝별 기록 (진단용): 행동, 관찰 앞부분, 막힘 여부, 확장 시점
+    plan: str = ""                              # 에피소드 끝 시점의 계획 전체
 
 
 @dataclass
@@ -175,6 +177,7 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
     seen = {(obs, "")}            # (관찰, 행동) 쌍: 같은 관찰에서 같은 행동을 또 하면 막힘 신호
     steps = expansions = 0
     reward, done = 0.0, False
+    traj: list[dict] = []
 
     while steps < cfg.max_steps and not done:
         avail = env.available()
@@ -186,6 +189,7 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
         tokens += r.tokens
         steps += 1
         step_no, action = parse_action(r.text)
+        valid = action is not None and is_valid(action, avail)
 
         # -- 막힘 신호: 무효 명령, "Nothing happens.", 또는 같은 관찰에서 같은 행동의 반복
         if action is None or not is_valid(action, avail):
@@ -198,12 +202,17 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
             seen.add(pair)
             history.append((action, _short(new_obs)))
             obs = new_obs
+        traj.append({"t": steps, "plan_step": step_no, "action": action, "valid": valid,
+                     "stuck": marks[-1], "obs": _short(obs, 160)})
 
         # -- 확장: 최근 2*trigger_n 스텝 중 막힘 신호가 trigger_n번 이상이면
         stuck = sum(marks[-2 * s.trigger_n:]) if s.trigger_n else 0
         if (not done and s.trigger_n and stuck >= s.trigger_n and expansions < s.max_expand):
-            note = f"The agent is stuck on step {step_no}. Last actions:\n" + \
-                   "\n".join(f"> {a} -> {o[:80]}" for a, o in history[-s.trigger_n:])
+            visited = sorted({a[6:] for a, _ in history if a.lower().startswith("go to ")})
+            note = (f"The agent is stuck on step {step_no}.\n"
+                    f"Places already visited: {', '.join(visited) or '(none)'}.\n"
+                    f"Last actions:\n" +
+                    "\n".join(f"> {a} -> {o[:100]}" for a, o in history[-6:]))
             add_level = s.scope == "global" or (s.scope == "hybrid" and len(plan.levels) < s.max_level)
             if add_level and len(plan.levels) < s.max_level:
                 tokens += make_level(llm, instruction, plan, s.rules, note)
@@ -213,8 +222,11 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
                 continue          # global인데 이미 최대 레벨: 더 확장할 수 없음
             expansions += 1
             marks.clear()
+            traj.append({"t": steps, "expand": "level" if add_level and len(plan.levels) > s.start_level else "local",
+                         "plan_step": step_no})
 
     d_in, d_out, d_cost = METER.delta(meter0)
     return Trial(success=reward >= cfg.success_threshold, reward=reward, tokens=tokens,
                  steps=steps, expansions=expansions, seconds=round(time.time() - t0, 3),
-                 in_tokens=d_in, out_tokens=d_out, cost_usd=round(d_cost, 6))
+                 in_tokens=d_in, out_tokens=d_out, cost_usd=round(d_cost, 6),
+                 traj=traj, plan=plan.render())

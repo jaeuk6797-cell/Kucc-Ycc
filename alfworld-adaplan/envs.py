@@ -29,6 +29,10 @@ class ALFWorldEnv:
         self._tw = None
         self._cmds: list[str] = []
 
+    def task_type(self, idx: int) -> str:
+        """게임 폴더 이름 앞부분 = 과제 유형 (pick_and_place_simple, look_at_obj_in_light 등 6종)."""
+        return os.path.basename(os.path.dirname(os.path.dirname(self.game_files[idx]))).split("-")[0]
+
     def reset(self, idx: int) -> tuple[str, str]:
         self._env.game_files = [self.game_files[idx]]
         self._env.num_games = 1

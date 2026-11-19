@@ -2,19 +2,25 @@
 
   python run.py pilot   --n 3 --mock               # 어댑터/흐름 확인 (API 호출 없음)
   python run.py pilot   --n 5                      # 실제 모델로 에피소드당 비용 실측 + 견적
-  python run.py compare --n 30                     # 두 전략을 같은 과제 n개에 돌려 성공률 비교
+  python run.py compare --n 134                    # 두 전략을 같은 과제에 돌려 성공률 비교 (134 = unseen 전체)
+  python run.py show --task 130 --sid adaplan_M3_adapt   # 저장된 한 에피소드의 행동 기록과 계획을 출력
 
-설정: alfworld_pilot_config.json (M=3, K=1). K 반복은 temperature 0에서 결과가 같아 의미가 없어 1로 둔다.
+설정: ../alfworld/pilot_config.json (M=3, K=1). 같은 과제의 반복 실행은 --reps로 늘린다
+(Claude는 temperature를 바꿀 수 없어서 반복해도 결과가 달라질 수 있고, 그 흔들림을 재는 데 쓴다).
 환경 준비: pip install alfworld (Python 3.11/3.12), alfworld-download, ALFWORLD_DATA 지정.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import random
+import time
+import traceback
+from collections import defaultdict
 from dataclasses import asdict
 
 from agent import RunConfig, Strategy, Trial, run_episode
@@ -28,6 +34,7 @@ M = CFG["M_values"][0]   # 3
 BASELINE = Strategy(sid="adaplan_M3", start_level=M, max_level=M, trigger_n=0)
 ADAPT = Strategy(sid="adaplan_M3_adapt", start_level=M, max_level=M, trigger_n=3,
                  max_expand=4, scope="local")
+CODE_VERSION = "2"   # 에이전트 프롬프트/막힘 규칙을 바꾸면 올려서 예전 캐시를 무효화한다
 
 
 class RandomLLM:
@@ -44,6 +51,8 @@ class RandomLLM:
         return Reply(f"Step: 1\nAction: {self.rng.choice(cmds)}", 10)
 
 
+# ---------------------------------------------------------------- 통계
+
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     if n == 0:
         return 0.0, 0.0
@@ -53,6 +62,33 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
     return c - h, c + h
 
+
+def mcnemar_exact(b: int, c: int) -> float:
+    """짝 비교의 정확 이항 검정(양측). b, c = 서로 결과가 갈린 쌍의 수."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    p = sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n
+    return min(1.0, 2 * p)
+
+
+def paired_diff_ci(pairs: list[tuple[int, int]], iters: int = 5000, seed: int = 0):
+    """(기준, ADaPT) 성공(0/1) 짝들에서 성공률 차이(ADaPT-기준)의 95% 부트스트랩 구간."""
+    if not pairs:
+        return 0.0, 0.0, 0.0
+    rng = random.Random(seed)
+    n = len(pairs)
+    d = sum(p[1] - p[0] for p in pairs) / n
+    boots = []
+    for _ in range(iters):
+        idx = [rng.randrange(n) for _ in range(n)]
+        boots.append(sum(pairs[i][1] - pairs[i][0] for i in idx) / n)
+    boots.sort()
+    return d, boots[int(0.025 * iters)], boots[int(0.975 * iters)]
+
+
+# ---------------------------------------------------------------- 실행 보조
 
 def build(args):
     from envs import ALFWorldEnv
@@ -71,89 +107,163 @@ def pick_tasks(num_games: int, n: int, seed: int) -> list[int]:
     return sorted(random.Random(seed).sample(range(num_games), min(n, num_games)))
 
 
+def signature(args, strat: Strategy) -> str:
+    """캐시 키: 결과에 영향을 주는 설정이 하나라도 다르면 다른 결과로 본다."""
+    raw = json.dumps({"model": args.model if not args.mock else "mock", "effort": args.effort,
+                      "split": args.split, "max_steps": args.max_steps, "code": CODE_VERSION,
+                      "strategy": strat.key()}, sort_keys=True, default=str)
+    return hashlib.md5(raw.encode()).hexdigest()[:10]
+
+
 def load_cache(path):
-    cache = {}
+    cache, spent = {}, 0.0
     if path and os.path.exists(path):
         for line in open(path, encoding="utf-8"):
             if line.strip():
                 row = json.loads(line)
-                cache[(row["sid"], row["task"])] = row
-    return cache
+                cache[(row["sid"], row["task"], row.get("rep", 0), row.get("sig"))] = row
+                spent += row.get("cost_usd", 0.0)
+    return cache, spent
 
 
-def run_one(env, llm_for, strat, task, cfg, cache, cache_path):
-    key = (strat.sid, task)
+def run_one(env, llm_for, strat, task, rep, cfg, args, cache, cache_path):
+    sig = signature(args, strat)
+    key = (strat.sid, task, rep, sig)
     if key in cache:
-        r = dict(cache[key])
-        return Trial(**{k: r[k] for k in Trial.__dataclass_fields__})
-    tr = run_episode(env, llm_for(task), strat, task, cfg)
-    row = {"sid": strat.sid, "task": task, **asdict(tr)}
+        r = cache[key]
+        return Trial(**{k: r[k] for k in Trial.__dataclass_fields__ if k in r}), True
+    tr = run_episode(env, llm_for(task * 1000 + rep), strat, task, cfg)
+    row = {"sid": strat.sid, "task": task, "rep": rep, "sig": sig, "ttype": env.task_type(task),
+           "ts": time.time(), **asdict(tr)}
     cache[key] = row
     if cache_path:
         with open(cache_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
-    return tr
+    return tr, False
+
+
+def show(args) -> None:
+    cache, _ = load_cache(args.cache)
+    rows = [r for (sid, t, rep, _), r in cache.items() if t == args.task and (not args.sid or sid == args.sid)]
+    if not rows:
+        print("해당 기록이 없습니다.")
+    for r in sorted(rows, key=lambda r: (r["sid"], r.get("rep", 0), r.get("ts", 0))):
+        print(f"\n=== {r['sid']} task {r['task']} rep {r.get('rep', 0)} 유형={r.get('ttype')} "
+              f"성공={r['success']} 스텝={r['steps']} 확장={r['expansions']} 비용=${r['cost_usd']:.4f}")
+        for e in r.get("traj", []):
+            if "expand" in e:
+                print(f"  -- t={e['t']}: 계획 확장({e['expand']}), 막힌 단계 {e['plan_step']}")
+            else:
+                flag = " [막힘]" if e["stuck"] else ""
+                print(f"  t={e['t']:>2} (plan {e['plan_step']}) {e['action']}{'' if e['valid'] else ' [무효]'}{flag} -> {e['obs']}")
+        print("  최종 계획:\n" + "\n".join("    " + l for l in r.get("plan", "").splitlines()))
+
+
+def summarize(args, tasks, strategies, res, ttypes) -> None:
+    keys = [(t, rep) for t in tasks for rep in range(args.reps)]
+    print(f"\n과제 {len(tasks)}개 x 반복 {args.reps} (split={args.split}, seed={args.seed}), M={M}, K=1")
+    for s in strategies:
+        rs = [res[s.sid][k] for k in keys if k in res[s.sid]]
+        if not rs:
+            continue
+        k = sum(r.success for r in rs)
+        lo, hi = wilson(k, len(rs))
+        cost = sum(r.cost_usd for r in rs)
+        print(f"{s.sid}: 성공 {k}/{len(rs)} = {k/len(rs):.0%} (95% 윌슨 {lo:.0%}–{hi:.0%}), "
+              f"평균 스텝 {sum(r.steps for r in rs)/len(rs):.1f}, 평균 확장 {sum(r.expansions for r in rs)/len(rs):.2f}, "
+              f"에피소드당 ${cost/len(rs):.4f}, 성공당 ${cost/k if k else float('inf'):.4f}")
+    if len(strategies) == 2:
+        both = [k for k in keys if k in res[BASELINE.sid] and k in res[ADAPT.sid]]
+        pairs = [(int(res[BASELINE.sid][k].success), int(res[ADAPT.sid][k].success)) for k in both]
+        b = sum(1 for p in pairs if p == (0, 1))
+        c = sum(1 for p in pairs if p == (1, 0))
+        d, lo, hi = paired_diff_ci(pairs)
+        print(f"\n짝 비교({len(both)}쌍): ADaPT만 성공 {b}, 기준만 성공 {c}, 정확검정(McNemar) p={mcnemar_exact(b, c):.3f}")
+        print(f"성공률 차이(ADaPT-기준) {d:+.1%} (95% 부트스트랩 {lo:+.1%} ~ {hi:+.1%})")
+        # 과제 유형별
+        by = defaultdict(list)
+        for k, p in zip(both, pairs):
+            by[ttypes.get(k[0], "?")].append(p)
+        print("\n유형별 (기준 성공 / ADaPT 성공 / 쌍 수):")
+        for tt, ps in sorted(by.items()):
+            print(f"  {tt:<28} {sum(p[0] for p in ps):>3} / {sum(p[1] for p in ps):>3} / {len(ps)}")
+        exp = [res[ADAPT.sid][k].expansions for k in both]
+        fired = sum(1 for e in exp if e > 0)
+        print(f"\nADaPT 확장이 한 번이라도 발동한 에피소드: {fired}/{len(exp)}")
+    if args.cmd == "pilot" and res[BASELINE.sid]:
+        rs = list(res[BASELINE.sid].values())
+        mean = sum(r.cost_usd for r in rs) / len(rs)
+        usable = args.budget * args.stop_frac
+        if mean:
+            print(f"예산 ${args.budget}의 {args.stop_frac:.0%}(${usable:.2f}) 내 약 {int(usable/mean)} 에피소드 가능")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["pilot", "compare"])
+    ap.add_argument("cmd", choices=["pilot", "compare", "show"])
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--model", default="claude-haiku-5-5")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"])
     ap.add_argument("--split", default="eval_out_of_distribution",
                     help="eval_out_of_distribution(unseen 134) / eval_in_distribution(seen 140)")
     ap.add_argument("--n", type=int, default=5, help="과제 수")
+    ap.add_argument("--reps", type=int, default=1, help="같은 과제의 반복 횟수 (모델 비결정성 측정용)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-steps", type=int, default=40)
     ap.add_argument("--budget", type=float, default=CFG["budget_usd"])
     ap.add_argument("--stop-frac", type=float, default=CFG["stop_frac"])
     ap.add_argument("--cost-log", default="cost_calls.jsonl")
     ap.add_argument("--cache", default="results_cache.jsonl")
+    ap.add_argument("--task", type=int, default=None, help="show: 과제 번호")
+    ap.add_argument("--sid", default=None, help="show: 전략 이름")
     args = ap.parse_args()
 
-    METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
-    METER.log_path = None if args.mock else args.cost_log
+    if args.cmd == "show":
+        show(args)
+        return
+
     cache_path = None if args.mock else args.cache
+    cache, spent = load_cache(cache_path)
+    METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
+    METER.cost = spent                      # 재시작해도 지금까지 쓴 비용을 이어서 센다
+    METER.log_path = None if args.mock else args.cost_log
     env, llm_for = build(args)
     cfg = RunConfig(max_steps=args.max_steps)
     tasks = pick_tasks(env.num_games, args.n, args.seed)
+    ttypes = {t: env.task_type(t) for t in tasks}
     strategies = [BASELINE] if args.cmd == "pilot" else [BASELINE, ADAPT]
-    cache = load_cache(cache_path)
-    res: dict[str, dict[int, Trial]] = {s.sid: {} for s in strategies}
+    res: dict[str, dict[tuple[int, int], Trial]] = {s.sid: {} for s in strategies}
+    total, done_n, failed, t_start = len(tasks) * args.reps * len(strategies), 0, [], time.time()
+    if spent:
+        print(f"[예산] 이전 실행까지 누적 ${spent:.4f} 사용 (한도 ${args.budget * args.stop_frac:.2f})")
     try:
         for t in tasks:                       # 과제 단위로 두 전략을 번갈아 돌려 중단돼도 짝이 맞게 한다
-            for s in strategies:
-                tr = run_one(env, llm_for, s, t, cfg, cache, cache_path)
-                res[s.sid][t] = tr
-                print(f"[{s.sid}] task {t}: 성공={tr.success} 스텝={tr.steps} 확장={tr.expansions} "
-                      f"입력={tr.in_tokens:,} 출력={tr.out_tokens:,} 비용=${tr.cost_usd:.4f}", flush=True)
+            for rep in range(args.reps):
+                for s in strategies:
+                    try:
+                        tr, cached = run_one(env, llm_for, s, t, rep, cfg, args, cache, cache_path)
+                    except BudgetExceeded:
+                        raise
+                    except Exception as e:     # API 오류 등: 이 에피소드만 건너뛰고 계속 (캐시에 안 남아 다음 실행에서 재시도)
+                        failed.append((s.sid, t, rep))
+                        print(f"[오류] {s.sid} task {t} rep {rep}: {type(e).__name__}: {e}", flush=True)
+                        traceback.print_exc(limit=2)
+                        continue
+                    res[s.sid][(t, rep)] = tr
+                    done_n += 1
+                    el = time.time() - t_start
+                    eta = el / max(done_n, 1) * (total - done_n)
+                    print(f"[{done_n}/{total}{' 캐시' if cached else ''}] {s.sid} task {t}({ttypes[t]}): "
+                          f"성공={tr.success} 스텝={tr.steps} 확장={tr.expansions} "
+                          f"입력={tr.in_tokens:,} 출력={tr.out_tokens:,} 비용=${tr.cost_usd:.4f} "
+                          f"| 누적 ${METER.cost:.3f} | 남은 약 {eta/60:.0f}분", flush=True)
     except BudgetExceeded as e:
         print(f"[예산 보호] 중단: {e}\n같은 명령을 다시 실행하면 캐시된 결과는 건너뛰고 이어서 진행합니다.")
     finally:
         print("[비용]", METER.summary())
-
-    print(f"\n과제 {len(tasks)}개 (split={args.split}, seed={args.seed}), M={M}, K=1")
-    for s in strategies:
-        rs = list(res[s.sid].values())
-        if not rs:
-            continue
-        k = sum(r.success for r in rs)
-        lo, hi = wilson(k, len(rs))
-        mean_cost = sum(r.cost_usd for r in rs) / len(rs)
-        print(f"{s.sid}: 성공 {k}/{len(rs)} = {k/len(rs):.0%} (95% 윌슨 {lo:.0%}–{hi:.0%}), "
-              f"평균 스텝 {sum(r.steps for r in rs)/len(rs):.1f}, 평균 확장 {sum(r.expansions for r in rs)/len(rs):.2f}, "
-              f"에피소드당 ${mean_cost:.4f}")
-    if args.cmd == "pilot" and res[BASELINE.sid]:
-        mean = sum(r.cost_usd for r in res[BASELINE.sid].values()) / len(res[BASELINE.sid])
-        usable = args.budget * args.stop_frac
-        if mean:
-            print(f"예산 ${args.budget}의 {args.stop_frac:.0%}(${usable:.2f}) 내 약 {int(usable/mean)} 에피소드 가능")
-    if args.cmd == "compare":
-        both = [t for t in tasks if t in res[BASELINE.sid] and t in res[ADAPT.sid]]
-        b = sum(res[ADAPT.sid][t].success and not res[BASELINE.sid][t].success for t in both)
-        c = sum(res[BASELINE.sid][t].success and not res[ADAPT.sid][t].success for t in both)
-        print(f"짝 비교({len(both)}개): ADaPT만 성공 {b}, 기준만 성공 {c}")
+    if failed:
+        print(f"[주의] 오류로 건너뛴 에피소드 {len(failed)}개 (같은 명령으로 다시 실행하면 재시도): {failed[:5]}")
+    summarize(args, tasks, strategies, res, ttypes)
 
 
 if __name__ == "__main__":
