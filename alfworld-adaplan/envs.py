@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import re
 
-DEFAULT_CONFIG = os.path.join(os.path.dirname(__file__), "alfworld_config.yaml")
+DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alfworld_config.yaml")
 
 
 class ALFWorldEnv:

@@ -23,8 +23,9 @@ import traceback
 import contextlib
 import io
 import subprocess
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
+import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from collections import defaultdict
 from dataclasses import asdict
@@ -40,10 +41,7 @@ M = CFG["M_values"][0]   # 3
 BASELINE = Strategy(sid="adaplan_M3", start_level=M, max_level=M, trigger_n=0)
 ADAPT = Strategy(sid="adaplan_M3_adapt", start_level=M, max_level=M, trigger_n=3,
                  max_expand=4, scope="local")
-CODE_VERSION = "3"   # 에이전트 프롬프트/막힘 규칙을 바꾸면 올려서 예전 캐시를 무효화한다
-
-_CACHE_LOCK = threading.Lock()
-
+CODE_VERSION = "4"   # 에이전트 프롬프트/막힘 규칙을 바꾸면 올려서 예전 캐시를 무효화한다
 
 class RandomLLM:
     """API 없이 흐름만 확인하는 가짜 LLM. 계획은 고정 문장, 행동은 허용 명령 중 무작위."""
@@ -98,30 +96,20 @@ def paired_diff_ci(pairs: list[tuple[int, int]], iters: int = 5000, seed: int = 
 
 # ---------------------------------------------------------------- 실행 보조
 
-def build(args):
+def make_env(args):
+    if os.environ.get("ADAPLAN_FAKE_ENV"):                # 테스트용: ALFWorld 없이 흐름만 확인
+        from test_core import FakeEnv
+        return FakeEnv()
     from envs import ALFWorldEnv
-    env = ALFWorldEnv(split=args.split)
+    return ALFWorldEnv(split=args.split)
+
+
+def make_llm_for(args):
     if args.mock:
-        llm_for = lambda i: RandomLLM(i)                  # noqa: E731
-    else:
-        from llm import AnthropicLLM
-        llm = AnthropicLLM(args.model, effort=args.effort)
-        llm_for = lambda i: llm                           # noqa: E731
-    return env, llm_for
-
-
-def make_env_getter(args, main_env):
-    """스레드마다 자기 환경 인스턴스를 쓴다(환경은 스레드 간 공유 불가). workers=1이면 기존 환경을 그대로 쓴다."""
-    if args.workers <= 1:
-        return lambda: main_env
-    from envs import ALFWorldEnv
-    tl = threading.local()
-
-    def get():
-        if not hasattr(tl, "env"):
-            tl.env = ALFWorldEnv(split=args.split)
-        return tl.env
-    return get
+        return lambda i: RandomLLM(i)                     # noqa: E731
+    from llm import AnthropicLLM
+    llm = AnthropicLLM(args.model, effort=args.effort)
+    return lambda i: llm                                  # noqa: E731
 
 
 def pick_tasks(num_games: int, n: int, seed: int) -> list[int]:
@@ -148,21 +136,49 @@ def load_cache(path):
     return cache, spent
 
 
-def run_one(env, llm_for, strat, task, rep, cfg, args, cache, cache_path):
-    sig = signature(args, strat)
-    key = (strat.sid, task, rep, sig)
-    if key in cache:
-        r = cache[key]
-        return Trial(**{k: r[k] for k in Trial.__dataclass_fields__ if k in r}), True
-    tr = run_episode(env, llm_for(task * 1000 + rep), strat, task, cfg)
-    row = {"sid": strat.sid, "task": task, "rep": rep, "sig": sig, "ttype": env.task_type(task),
-           "ts": time.time(), **asdict(tr)}
-    with _CACHE_LOCK:
-        cache[key] = row
-        if cache_path:
-            with open(cache_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(row) + "\n")
-    return tr, False
+STRATS = {x.sid: x for x in (BASELINE, ADAPT)}
+_W: dict = {}          # 작업 프로세스가 쓰는 환경/LLM/설정
+
+
+def make_row(args, strat, task, rep, tr, ttype):
+    return {"sid": strat.sid, "task": task, "rep": rep, "sig": signature(args, strat), "ttype": ttype,
+            "ts": time.time(), **asdict(tr)}
+
+
+def trial_from_row(r) -> Trial:
+    return Trial(**{k: r[k] for k in Trial.__dataclass_fields__ if k in r})
+
+
+def run_job(env, llm_for, cfg, args, t, rep, sids):
+    """과제 하나(같은 rep)에서 전략들을 연달아 돌린다. (sid, row 또는 None, 오류 문자열 또는 None) 목록을 돌려준다."""
+    out = []
+    for sid in sids:
+        s = STRATS[sid]
+        try:
+            tr = run_episode(env, llm_for(t * 1000 + rep), s, t, cfg)
+            out.append((sid, make_row(args, s, t, rep, tr, env.task_type(t)), None))
+        except BudgetExceeded:
+            raise
+        except Exception as ex:          # API 오류 등: 이 에피소드만 건너뜀 (캐시에 안 남아 다음 실행에서 재시도)
+            out.append((sid, None, f"{type(ex).__name__}: {ex}"))
+    return t, rep, out
+
+
+def worker_init(args, shared):
+    """작업 프로세스 시작 시 한 번: 자기만의 임시 작업 폴더에서 환경을 만든다.
+    (ALFWorld가 환경을 만들 때 외부 플래너가 작업 폴더에 임시 파일을 쓰므로, 폴더를 나눠야 서로 안 부딪힌다.)"""
+    import envs  # noqa: F401  (폴더를 옮기기 전에 import)
+    if os.environ.get("ADAPLAN_FAKE_ENV"):
+        import test_core  # noqa: F401
+    os.chdir(tempfile.mkdtemp(prefix="alfw_"))
+    METER.shared = shared
+    METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
+    METER.log_path = None if args.mock else args.cost_log
+    _W.update(env=make_env(args), llm_for=make_llm_for(args), cfg=RunConfig(max_steps=args.max_steps), args=args)
+
+
+def proc_job(t, rep, sids):
+    return run_job(_W["env"], _W["llm_for"], _W["cfg"], _W["args"], t, rep, sids)
 
 
 def show(args) -> None:
@@ -294,7 +310,7 @@ def main() -> None:
     ap.add_argument("--stop-frac", type=float, default=CFG["stop_frac"])
     ap.add_argument("--cost-log", default="cost_calls.jsonl")
     ap.add_argument("--cache", default="results_cache.jsonl")
-    ap.add_argument("--workers", type=int, default=1, help="동시에 돌릴 에피소드 수 (권장 3~4, API 속도 제한 주의)")
+    ap.add_argument("--workers", type=int, default=1, help="동시에 돌릴 작업 프로세스 수 (권장 3, API 속도 제한 주의)")
     ap.add_argument("--push", action="store_true", help="결과 파일을 git commit + push (실패해도 무시)")
     ap.add_argument("--task", type=int, default=None, help="show: 과제 번호")
     ap.add_argument("--sid", default=None, help="show: 전략 이름")
@@ -307,12 +323,15 @@ def main() -> None:
         report(args)
         return
 
+    args.cache = os.path.abspath(args.cache)             # 작업 프로세스가 폴더를 옮겨도 경로가 유지되게
+    args.cost_log = os.path.abspath(args.cost_log)
     cache_path = None if args.mock else args.cache
     cache, spent = load_cache(cache_path)
     METER.budget_usd, METER.stop_frac = args.budget, args.stop_frac
     METER.cost = spent                      # 재시작해도 지금까지 쓴 비용을 이어서 센다
     METER.log_path = None if args.mock else args.cost_log
-    env, llm_for = build(args)
+    env = make_env(args)
+    llm_for = make_llm_for(args)
     cfg = RunConfig(max_steps=args.max_steps)
     tasks = pick_tasks(env.num_games, args.n, args.seed)
     ttypes = {t: env.task_type(t) for t in tasks}
@@ -321,45 +340,61 @@ def main() -> None:
     total, done_n, failed, t_start = len(tasks) * args.reps * len(strategies), 0, [], time.time()
     if spent:
         print(f"[예산] 이전 실행까지 누적 ${spent:.4f} 사용 (한도 ${args.budget * args.stop_frac:.2f})")
-    get_env = make_env_getter(args, env)
+    shared = mp.get_context("spawn").Value("d", spent) if args.workers > 1 else None
+    cur_cost = lambda: shared.value if shared is not None else METER.cost      # noqa: E731
 
-    def job(t, rep):
-        """과제 하나(같은 rep)에서 두 전략을 연달아 돌린다. 중단돼도 짝이 맞는다."""
-        e, out = get_env(), []
-        for s in strategies:
-            try:
-                tr, cached = run_one(e, llm_for, s, t, rep, cfg, args, cache, cache_path)
-                out.append((s, tr, cached, None))
-            except BudgetExceeded:
-                raise
-            except Exception as ex:      # API 오류 등: 이 에피소드만 건너뜀 (캐시에 안 남아 다음 실행에서 재시도)
-                out.append((s, None, False, ex))
-        return t, rep, out
+    def show_done(sid, t, rep, tr, cached):
+        nonlocal done_n
+        res[sid][(t, rep)] = tr
+        done_n += 1
+        eta = (time.time() - t_start) / max(done_n, 1) * (total - done_n)
+        print(f"[{done_n}/{total}{' 캐시' if cached else ''}] {sid} task {t}({ttypes[t]}): "
+              f"성공={tr.success} 스텝={tr.steps} 확장={tr.expansions} "
+              f"입력={tr.in_tokens:,} 출력={tr.out_tokens:,} 비용=${tr.cost_usd:.4f} "
+              f"| 누적 ${cur_cost():.3f} | 남은 약 {eta/60:.0f}분", flush=True)
 
-    jobs = [(t, rep) for t in tasks for rep in range(args.reps)]
-    ex = ThreadPoolExecutor(max_workers=max(1, args.workers))
+    def handle(t, rep, out):
+        for sid, row, err in out:
+            if err is not None:
+                failed.append((sid, t, rep))
+                print(f"[오류] {sid} task {t} rep {rep}: {err}", flush=True)
+                continue
+            if cache_path:
+                with open(cache_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(row) + "\n")
+            cache[(sid, t, rep, row["sig"])] = row
+            show_done(sid, t, rep, trial_from_row(row), False)
+
+    pending = []                              # 캐시에 없는 (과제, 반복, 전략들)
+    for t in tasks:
+        for rep in range(args.reps):
+            todo = []
+            for s in strategies:
+                hit = cache.get((s.sid, t, rep, signature(args, s)))
+                if hit is not None:
+                    show_done(s.sid, t, rep, trial_from_row(hit), True)
+                else:
+                    todo.append(s.sid)
+            if todo:
+                pending.append((t, rep, todo))
+
+    ex = None
     try:
-        futs = [ex.submit(job, t, rep) for t, rep in jobs]
-        for fut in as_completed(futs):
-            t, rep, out = fut.result()       # BudgetExceeded는 여기서 올라온다
-            for s, tr, cached, err in out:
-                if err is not None:
-                    failed.append((s.sid, t, rep))
-                    print(f"[오류] {s.sid} task {t} rep {rep}: {type(err).__name__}: {err}", flush=True)
-                    continue
-                res[s.sid][(t, rep)] = tr
-                done_n += 1
-                el = time.time() - t_start
-                eta = el / max(done_n, 1) * (total - done_n)
-                print(f"[{done_n}/{total}{' 캐시' if cached else ''}] {s.sid} task {t}({ttypes[t]}): "
-                      f"성공={tr.success} 스텝={tr.steps} 확장={tr.expansions} "
-                      f"입력={tr.in_tokens:,} 출력={tr.out_tokens:,} 비용=${tr.cost_usd:.4f} "
-                      f"| 누적 ${METER.cost:.3f} | 남은 약 {eta/60:.0f}분", flush=True)
+        if args.workers <= 1:
+            for t, rep, sids in pending:
+                handle(*run_job(env, llm_for, cfg, args, t, rep, sids))
+        else:
+            ex = ProcessPoolExecutor(max_workers=args.workers, mp_context=mp.get_context("spawn"),
+                                     initializer=worker_init, initargs=(args, shared))
+            futs = [ex.submit(proc_job, t, rep, sids) for t, rep, sids in pending]
+            for fut in as_completed(futs):
+                handle(*fut.result())          # BudgetExceeded는 여기서 올라온다
     except BudgetExceeded as e:
         print(f"[예산 보호] 중단: {e}\n같은 명령을 다시 실행하면 캐시된 결과는 건너뛰고 이어서 진행합니다.")
     finally:
-        ex.shutdown(wait=True, cancel_futures=True)
-        print("[비용]", METER.summary())
+        if ex is not None:
+            ex.shutdown(wait=True, cancel_futures=True)
+        print("[비용]", METER.summary() if shared is None else f"누적 ${cur_cost():.4f} (병렬 {args.workers}개)")
     if failed:
         print(f"[주의] 오류로 건너뛴 에피소드 {len(failed)}개 (같은 명령으로 다시 실행하면 재시도): {failed[:5]}")
     buf = io.StringIO()
@@ -367,7 +402,7 @@ def main() -> None:
         summarize(args, tasks, strategies, res, ttypes)
     text = buf.getvalue()
     print(text, end="")
-    save_report(args, text, f"\n비용: {METER.summary()}\n")
+    save_report(args, text, "\n비용: " + (METER.summary() if shared is None else f"누적 ${cur_cost():.4f}") + "\n")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,14 @@
 
 ## 1. 진행 기록 (최신 순)
 
+### 2026-11-19 (4) 스레드 병렬 실행 오류 → 프로세스 병렬로 교체 (코드 버전 3 → 4)
+- WSL `compare --n 5 --reps 2 --workers 3`에서 `AttributeError: 'list' object has no attribute 'name'`, `IndexError: pop from empty list` 발생(task 66 rep 0, 두 전략 모두)
+- 원인(가설): ALFWorld 환경 생성 시 외부 플래너가 작업 폴더에 임시 파일을 쓰고(`Reordering and filtering variables` 로그), TextWorld 전역 상태도 있어 스레드끼리 충돌
+- 조치: `--workers N`을 **작업 프로세스**(spawn)로 변경. 프로세스마다 임시 작업 폴더·자기 환경 사용, 누적 비용은 프로세스 간 공유 값으로 예산 보호 유지, 캐시 기록은 메인 프로세스만
+- 스레드 실행에서 나온 결과가 섞였을 수 있어 `CODE_VERSION`을 4로 올려 캐시를 새로 시작
+- 테스트 8개 통과(프로세스 풀 결과 = 단일 프로세스 결과, 가짜 환경). 실제 ALFWorld에서의 병렬은 재확인 필요
+- 참고: 스레드 실행 중 task 10은 두 전략 모두 성공했으나(기준 15스텝, ADaPT 14스텝, 확장 0) 신뢰하지 않음
+
 ### 2026-11-19 (3) 프롬프트 개선 + 병렬 실행 구현 (코드 버전 2 → 3)
 - **프롬프트** (`agent.py`)
   - 공통(기준·ADaPT 모두): 환경 안내에 "목표에 쓰인 물체 이름 그대로 사용, cup/mug 같은 유사 물체로 대체 금지" 추가

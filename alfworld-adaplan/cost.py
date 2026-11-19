@@ -48,15 +48,17 @@ class CostMeter:
     calls: int = 0
     over_100k: int = 0
     log_path: str | None = None
+    shared: object = None          # 병렬(프로세스) 실행 시 모두가 함께 올리는 누적 비용(mp.Value)
     _lock: object = field(default_factory=threading.Lock, repr=False)
     _tl: object = field(default_factory=threading.local, repr=False)   # 스레드별 누적(에피소드 비용 계산용)
 
     def check(self) -> None:
         """호출 직전에 부른다. 예산 한도에 닿았으면 멈춘다."""
         limit = self.budget_usd * self.stop_frac
-        if self.cost >= limit:
+        total = self.shared.value if self.shared is not None else self.cost
+        if total >= limit:
             raise BudgetExceeded(
-                f"누적 ${self.cost:.3f} >= 한도 ${limit:.2f} (예산 ${self.budget_usd} x {self.stop_frac:.0%})")
+                f"누적 ${total:.3f} >= 한도 ${limit:.2f} (예산 ${self.budget_usd} x {self.stop_frac:.0%})")
 
     def add(self, model: str, role: str, in_tok: int, out_tok: int,
             cache_read: int = 0, cache_write: int = 0) -> float:
@@ -72,6 +74,9 @@ class CostMeter:
             self.cache_read += cache_read
             self.cache_write += cache_write
             self.cost += c
+            if self.shared is not None:
+                with self.shared.get_lock():
+                    self.shared.value += c
             self.calls += 1
             self.over_100k += long_prompt
             if self.log_path:

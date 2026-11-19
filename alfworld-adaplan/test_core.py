@@ -118,6 +118,30 @@ def test_parallel_runs_match_serial():
     assert serial == par
 
 
+def test_process_pool_matches_serial():
+    """작업 프로세스(spawn, 각자 임시 폴더)로 돌린 결과가 한 프로세스로 돌린 결과와 같다."""
+    import os
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    os.environ["ADAPLAN_FAKE_ENV"] = "1"
+    args = SimpleNamespace(mock=True, model="m", effort="low", split="s", max_steps=15, budget=27.0,
+                           stop_frac=0.7, cost_log="x.jsonl", workers=2)
+    sids = [run.BASELINE.sid, run.ADAPT.sid]
+    cfg = RunConfig(max_steps=15)
+    serial = {}
+    for t in range(4):
+        _, _, out = run.run_job(FakeEnv(), lambda i: run.RandomLLM(i), cfg, args, t, 0, sids)
+        serial[t] = [(sid, r["steps"], r["expansions"]) for sid, r, err in out]
+    ctx = mp.get_context("spawn")
+    shared = ctx.Value("d", 0.0)
+    cwd = os.getcwd()
+    with ProcessPoolExecutor(2, mp_context=ctx, initializer=run.worker_init, initargs=(args, shared)) as ex:
+        futs = [ex.submit(run.proc_job, t, 0, sids) for t in range(4)]
+        par = {t: [(sid, r["steps"], r["expansions"]) for sid, r, err in out]
+               for t, _, out in (f.result() for f in futs)}
+    assert os.getcwd() == cwd and par == serial
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
