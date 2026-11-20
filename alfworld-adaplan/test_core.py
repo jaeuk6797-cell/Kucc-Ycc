@@ -238,6 +238,33 @@ def test_prune_keeps_m3_and_counts_spend(tmp_path):
     run.prune(SimpleNamespace(cache=str(c)))      # 두 번째 실행은 아무것도 안 옮김
 
 
+def test_effect_by_tier(tmp_path):
+    import csv, json
+    import difficulty
+    feats = tmp_path / "f.csv"
+    rows = [{"task": i, "ttype": "pick_and_place_simple", "plan_len": 4 + i // 4, "n_goto": 2, "n_receps": 20, "needs_tool": 0,
+             "scene": 1, "tier": 1} for i in range(16)]
+    with open(feats, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    a = SimpleNamespace(model="claude-haiku-5-5", effort="low", split="s", max_steps=40, mock=False)
+    cache = tmp_path / "c.jsonl"
+    lines = []
+    for t in range(16):
+        for rep in range(2):
+            lines.append({"sid": "adaplan_M3", "task": t, "rep": rep, "sig": run.signature(a, run.BASELINE), "success": t < 8})
+            lines.append({"sid": "adaplan_M3_adapt", "task": t, "rep": rep, "sig": run.signature(a, run.ADAPT), "success": t < 12})
+        # 다른 split의 같은 task 번호 결과가 섞이면 안 됨
+        lines.append({"sid": "adaplan_M3", "task": t, "rep": 0, "sig": "other", "success": True})
+    cache.write_text("\n".join(json.dumps(r) for r in lines), encoding="utf-8")
+    text = difficulty.effect_by_tier(str(feats), str(cache), "s", 4, "adaplan_M3", "adaplan_M3_adapt", "claude-haiku-5-5", "low", 40)
+    assert "전체" in text and "+25.0%" in text           # 16개 중 4개(0.25)만 새로 성공
+    rows2 = [{"plan_len": 5, "n_receps": 20} for _ in range(10)]
+    difficulty.assign_tiers_tied(rows2, 4)
+    assert len({r["tier"] for r in rows2}) == 1          # 같은 값은 같은 단계
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

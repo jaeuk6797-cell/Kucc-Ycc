@@ -14,6 +14,7 @@ agent 결과는 단계를 매기는 데 쓰지 않고, 이 단계가 실제 성�
   python difficulty.py features                    # 과제별 속성 표(difficulty_features.csv) 만들기 (API 불필요)
   python difficulty.py analyze --cache results_cache.jsonl   # 단계별 성공률 + 순위상관 + 전략 간 일치도
   python difficulty.py compare-tiers --cache results_cache.jsonl   # agent 비의존 단계 vs 기존 agent 의존(확장 횟수) 단계 비교
+  python difficulty.py effect --tiers 4 --split eval_out_of_distribution   # agent 비의존 4단계별 ADaPT 효과 (API 불필요)
 """
 
 from __future__ import annotations
@@ -124,6 +125,92 @@ def analyze(features_csv: str, cache_path: str) -> None:
         print("  난이도 속성이 두 전략 모두에서 같은 방향의 상관을 보이면 특정 agent에 종속되지 않는다는 근거가 된다.")
 
 
+def assign_tiers_tied(rows: list[dict], k: int) -> None:
+    """(plan_len, n_receps)가 같은 과제는 같은 단계에 넣는 k등분 (assign_tiers는 동점을 과제 번호 순으로 갈라서 쓰지 않는다)."""
+    keys = [(r["plan_len"], r["n_receps"]) for r in rows]
+    order = sorted(set(keys))
+    n = len(rows)
+    below = 0
+    tier_of = {}
+    for key in order:
+        cnt = keys.count(key)
+        mid = below + (cnt - 1) / 2          # 이 묶음의 가운데 순위(0부터)
+        tier_of[key] = int(mid * k / n) + 1
+        below += cnt
+    for r, key in zip(rows, keys):
+        r["tier"] = tier_of[key]
+
+
+def effect_by_tier(features_csv: str, cache_path: str, split: str, k: int, base_sid: str, treat_sid: str,
+                   model: str, effort: str, max_steps: int) -> str:
+    """agent 비의존 단계별로 (처치 - 기준) 성공률 차이를 과제 단위로 집계한다. 캐시는 서명으로 split을 걸러 섞이지 않게 한다."""
+    import random
+    from types import SimpleNamespace
+
+    import run
+    rows = list(csv.DictReader(open(features_csv, encoding="utf-8")))
+    for r in rows:
+        r["task"] = int(r["task"])
+        r["plan_len"], r["n_receps"] = int(r["plan_len"]), int(r["n_receps"])
+    assign_tiers_tied(rows, k)
+    feats = {r["task"]: r for r in rows}
+    a = SimpleNamespace(model=model, effort=effort, split=split, max_steps=max_steps, mock=False)
+    sig = {sid: run.signature(a, run.STRATS[sid]) for sid in (base_sid, treat_sid)}
+    succ = {sid: defaultdict(dict) for sid in sig}
+    for line in open(cache_path, encoding="utf-8"):
+        if line.strip():
+            r = json.loads(line)
+            if r["sid"] in sig and r.get("sig") == sig[r["sid"]]:
+                succ[r["sid"]][r["task"]][r.get("rep", 0)] = int(r["success"])
+    out = [f"\n난이도 단계별 효과: {treat_sid} - {base_sid} (split={split}, 단계 {k}개, 과제 단위, 과제 부트스트랩 95%)"]
+    tasks = sorted(t for t in feats if t in succ[base_sid] and t in succ[treat_sid])
+    if not tasks:
+        out.append("두 전략 모두 결과가 있는 과제가 없습니다. (split/모델/effort/max_steps가 캐시와 같은지 확인)")
+        return "\n".join(out)
+
+    def mean_pair(t):
+        reps = sorted(set(succ[base_sid][t]) & set(succ[treat_sid][t]))
+        if not reps:
+            return None
+        return (sum(succ[base_sid][t][x] for x in reps) / len(reps), sum(succ[treat_sid][t][x] for x in reps) / len(reps))
+    pairs = {t: mean_pair(t) for t in tasks}
+    pairs = {t: p for t, p in pairs.items() if p}
+
+    def boot(ts, iters=5000):
+        diffs = [pairs[t][1] - pairs[t][0] for t in ts]
+        if len(diffs) < 2:
+            return None
+        rng = random.Random(0)
+        bs = sorted(sum(rng.choice(diffs) for _ in diffs) / len(diffs) for _ in range(iters))
+        return sum(diffs) / len(diffs), bs[int(0.025 * iters)], bs[int(0.975 * iters) - 1]
+
+    out.append("단계  과제수  plan_len  n_receps   기준   처치   차이 [95%]                 유형 구성")
+    for tier in range(1, k + 1):
+        ts = [t for t in pairs if feats[t]["tier"] == tier]
+        if not ts:
+            continue
+        pl = [feats[t]["plan_len"] for t in ts]
+        nr = [feats[t]["n_receps"] for t in ts]
+        b = sum(pairs[t][0] for t in ts) / len(ts)
+        tr = sum(pairs[t][1] for t in ts) / len(ts)
+        ci = boot(ts)
+        cis = f"{ci[0]:+.1%} [{ci[1]:+.1%}, {ci[2]:+.1%}]" if ci else "-"
+        comp = defaultdict(int)
+        for t in ts:
+            comp[feats[t]["ttype"].split("_")[0] + ("_" + feats[t]["ttype"].split("_")[1] if feats[t]["ttype"].startswith("pick_") else "")] += 1
+        out.append(f"{tier:>3}  {len(ts):>6}  {min(pl)}-{max(pl):<7} {min(nr)}-{max(nr):<7} {b:>5.0%} {tr:>5.0%}   {cis:<28}"
+                   + ", ".join(f"{k2}:{v}" for k2, v in sorted(comp.items())))
+    allts = list(pairs)
+    ci = boot(allts)
+    out.append(f"전체  {len(allts):>5}  {'':<9}{'':<9} "
+               f"{sum(p[0] for p in pairs.values())/len(pairs):>5.0%} {sum(p[1] for p in pairs.values())/len(pairs):>5.0%}   "
+               f"{ci[0]:+.1%} [{ci[1]:+.1%}, {ci[2]:+.1%}]")
+    rho = spearman([feats[t]["tier"] for t in pairs], [1 - pairs[t][0] for t in pairs])
+    out.append(f"\n단계(쉬움→어려움) vs 기준 실패율 순위상관 = {rho:+.2f}  (agent 비의존 난이도가 실제 어려움과 맞는지)")
+    out.append("주의: plan_len은 과제 유형과 거의 겹쳐서 단계와 유형이 섞여 있음(위 유형 구성 참고). 단계별 과제 수가 작아 구간이 넓음.")
+    return "\n".join(out)
+
+
 def agent_tier(rows: list[dict]) -> int:
     """기존 방식(webshop-adaplan/difficulty.py)과 같은 규칙: 확장 없이 성공=1, 1번 확장 후=2, 2번=3, 3번 이상=4, 과반 실패=5."""
     ok = [r for r in rows if r["success"]]
@@ -175,13 +262,20 @@ def compare_tiers(features_csv: str, cache_path: str, ref_sid: str, other_sid: s
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["features", "analyze", "compare-tiers"])
+    ap.add_argument("cmd", choices=["features", "analyze", "compare-tiers", "effect"])
     ap.add_argument("--ref-sid", default="adaplan_M3_adapt", help="agent 의존 단계를 만들 기준 전략")
     ap.add_argument("--other-sid", default="adaplan_M3", help="교차 검증용 다른 전략")
     ap.add_argument("--split", default="eval_out_of_distribution")
     ap.add_argument("--features", default="difficulty_features.csv")
-    ap.add_argument("--cache", default="results_cache.jsonl")
+    ap.add_argument("--cache", default=None, help="기본: $ADAPLAN_OUT/results_cache.jsonl, 없으면 ./results_cache.jsonl")
+    ap.add_argument("--tiers", type=int, default=4, help="effect: 난이도 단계 수")
+    ap.add_argument("--base-sid", default="adaplan_M3")
+    ap.add_argument("--treat-sid", default="adaplan_M3_adapt")
+    ap.add_argument("--model", default="claude-haiku-5-5")
+    ap.add_argument("--effort", default="low")
+    ap.add_argument("--max-steps", type=int, default=40)
     a = ap.parse_args()
+    a.cache = a.cache or os.path.join(os.environ.get("ADAPLAN_OUT") or ".", "results_cache.jsonl")
     if a.cmd == "features":
         rows = build_features(a.split, a.features)
         tc = defaultdict(int)
@@ -191,5 +285,13 @@ if __name__ == "__main__":
         print("단계별 과제 수:", dict(sorted(tc.items())))
     elif a.cmd == "analyze":
         analyze(a.features, a.cache)
+    elif a.cmd == "effect":
+        text = effect_by_tier(a.features, a.cache, a.split, a.tiers, a.base_sid, a.treat_sid, a.model, a.effort, a.max_steps)
+        print(text)
+        from types import SimpleNamespace
+
+        import run
+        run.save_report(SimpleNamespace(mock=False, cmd="tiers", n=a.tiers, reps=0, seed=0, split=a.split, model=a.model,
+                                        out_dir=os.environ.get("ADAPLAN_OUT"), push=False, cache=a.cache), text, "")
     else:
         compare_tiers(a.features, a.cache, a.ref_sid, a.other_sid)

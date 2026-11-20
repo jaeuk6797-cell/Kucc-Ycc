@@ -14,6 +14,14 @@
 
 ## 1. 진행 기록 (최신 순)
 
+### 2026-11-20 (17) 에이전트 비의존 난이도 4단계별 ADaPT 효과 분석 코드 추가 (실행 전)
+- 멘토 피드백(난이도 정의가 agent에 의존하면 순환적) 대응. `difficulty.py effect --tiers 4`: 과제 파일 속성(전문가 계획 길이 `plan_len`, 수납장 수 `n_receps`)으로 과제를 4단계로 나누고, 단계별로 (처치 - 기준) 성공률 차이와 과제 부트스트랩 95% 구간을 출력(API 비용 없음). 캐시에서 서명으로 split을 걸러 seen/unseen이 섞이지 않음. 결과는 `<out-dir>/results/tiers_*.md`로 저장
+- 동점 처리: `plan_len`·`n_receps`가 같은 과제는 같은 단계(`assign_tiers_tied`). 기존 `assign_tiers`/CSV의 `tier` 열은 그대로 둠
+- unseen 134 task의 4단계 구성(코드로 계산한 값, 성공률 아님): 1단계 27개(plan_len 4, look_at 18 + pick_and_place 9), 2단계 26개(plan_len 4~6, pick_and_place 15 + clean 10 + heat 1), 3단계 64개(plan_len 6, clean 21 + heat 22 + cool 21), 4단계 17개(plan_len 8, pick_two 17)
+- 주의(가설 아님, 구조적 사실): 단계가 과제 유형과 거의 겹침(특히 4단계는 pick_two뿐). 단계 효과와 유형 효과는 분리 안 됨. 앞서 (10)에서 pick_two는 기준이 이미 높았으므로 "plan_len이 길수록 어렵다"는 순위상관은 약할 수 있음(미확인)
+- seen 분할 속성표는 아직 없음: `python difficulty.py features --split eval_in_distribution --features difficulty_features_seen.csv`로 생성 필요(ALFWorld 환경이 있는 WSL에서)
+- 테스트 15개 통과
+
 ### 2026-11-20 (16) seen 분할(`eval_in_distribution`) 재현 `ablate` — 140 task × 2회, 전략당 280 에피소드 (결과 파일 `/mnt/d/kucc/results/ablate_20261120_214843_n140_r2.md`)
 - 프롬프트·M 선택은 unseen 134 task를 보고 정했고, 이 분할은 그때 보지 않은 task
 
@@ -231,6 +239,7 @@
 - [x] 비교군 실행 및 `ablate` (위 (13))
 - [ ] `ablate` 재실행으로 M1_adapt vs M1 직접 비교(구간) 확인 (API 비용 없음, 코드 동기화 필요)
 - [x] seen 분할 확인 실행 (위 (16))
+- [ ] `difficulty.py effect --tiers 4` 실행(unseen, seen)해 결과 확인
 - [ ] seen 분할에서 힌트 없는 ADaPT(`--arms adaplan_M3_adapt_nohint`) 실행해 분해·힌트 몫 분리
 - [ ] (선택) 2회차 완료 후 `table`로 과제 단위 평균·부호검정 재집계
 - [ ] 멘토 피드백 항목 정리 (동적 K, 팁 생성 베이스라인, 한 문장 주장, Condition B 설명 수정)
