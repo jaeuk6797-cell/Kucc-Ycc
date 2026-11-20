@@ -14,6 +14,13 @@
 
 ## 1. 진행 기록 (최신 순)
 
+### 2026-11-20 (23) Colab Llama 서버 준비 + 확인 실행 시도 (본 실험 전)
+- Colab(T4 GPU)에서 Ollama로 `llama3.1:8b`(Q4_K_M) 서버를 띄우고 cloudflared 터널로 연결. WSL에서 `/api/tags`와 채팅 호출 정상 응답 확인(첫 호출 약 25초, 모델 로딩 포함)
+- WSL 상태: 최신 코드 동기화됨, `openai` 설치됨, GPU 없음, `ALFWORLD_DATA`는 셸에 설정돼 있지 않아 `~/alfworld_data`를 직접 지정해야 함(지정 시 seen 140게임 인식)
+- 2개 task 확인 실행(seen, 계획 모델 Llama): 계획 호출 6회가 Llama로 정상 처리됨(입력 1,870 / 출력 322 토큰). 이어지는 행동 호출(Haiku)에서 `AuthenticationError 401 invalid x-api-key`로 중단. 이 환경의 `ANTHROPIC_API_KEY`가 유효하지 않음. 키는 사용자가 직접 export한 터미널에서만 사용(키는 로그에 기록하지 않음)
+- 누적 비용: 실행 출력 기준 $10.0219 / 한도 $18.90 (앞서 약 $7로 어림한 값보다 큼). 남은 한도 약 $8.88
+- 다음: 사용자 터미널에서 유효한 키로 확인 실행 → `show`로 Llama 계획 형식 확인 → 본 실험
+
 ### 2026-11-20 (22) 계획·분해 모델만 따로 지정하는 옵션 구현 (코드만, 실행 전)
 - 배경: 다른 연구 트랙에서는 계획 생성을 Llama-3.1-8B로 했고 M=3이 가장 효율적이었다고 함. 이 트랙은 Haiku 5.5가 계획·행동·분해를 모두 맡아 M=1이 더 높았음. 계획 모델 차이가 M의 최적값을 바꾸는지 확인하려는 것(가설, 미검증)
 - 구현: `--planner-model`(예: llama3.1:8b), `--planner-base-url`(OpenAI 호환 서버, Ollama면 http://localhost:11434/v1), `--planner-key-env`(키가 든 환경변수 이름), `--planner-price-in/out`(USD/100만 토큰, 기본 0.05/0.08은 임의 기본값이므로 확인해서 지정). `plan`, `refine` 호출만 계획 모델로, `act`는 `--model`(Haiku)로 보냄(`RoleRouter`)
