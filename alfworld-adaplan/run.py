@@ -562,6 +562,7 @@ def main() -> None:
                     help="ALFWorld 임시 파일을 쌓을 폴더. 환경변수 ADAPLAN_TMP으로도 지정 (예: /mnt/d/kucc_tmp)")
     ap.add_argument("--arms", default=None,
                     help="compare/ablate: 추가로 돌릴 전략 이름(쉼표). 예: adaplan_M1,adaplan_M2. 'all'이면 비교군 전부")
+    ap.add_argument("--skip-adapt", action="store_true", help="compare: 기본 ADaPT 전략은 건너뜀(--arms로 지정한 전략과 기준만 실행, 비용 절약)")
     ap.add_argument("--planner-model", default=None,
                     help="계획·분해 호출만 이 모델로 보냄(OpenAI 호환 서버). 예: llama3.1:8b. 행동 호출은 --model")
     ap.add_argument("--planner-base-url", default=None, help="예: http://localhost:11434/v1 (Ollama)")
@@ -613,7 +614,8 @@ def main() -> None:
     cfg = RunConfig(max_steps=args.max_steps)
     tasks = pick_tasks(env.num_games, args.n, args.seed)
     ttypes = {t: env.task_type(t) for t in tasks}
-    strategies = [BASELINE] if args.cmd == "pilot" else [BASELINE, ADAPT] + extra_arms(args)
+    strategies = [BASELINE] if args.cmd == "pilot" else \
+        [BASELINE] + ([] if getattr(args, "skip_adapt", False) else [ADAPT]) + extra_arms(args)
     res: dict[str, dict[tuple[int, int], Trial]] = {s.sid: {} for s in strategies}
     total, done_n, failed, t_start = len(tasks) * args.reps * len(strategies), 0, [], time.time()
     if spent:
