@@ -157,15 +157,15 @@ def archive_path(path):
 
 
 def prune(args) -> None:
-    """캐시에서 M3 계열(adaplan_M3*)만 남기고 나머지 행은 보관 파일로 옮긴다. 백업을 먼저 만들고, 비용은 보관 파일로 계속 센다."""
+    """캐시에서 기준(adaplan_M3)과 ADaPT(adaplan_M3_adapt)만 남기고 나머지 행은 보관 파일로 옮긴다. 백업을 먼저 만들고, 비용은 보관 파일로 계속 센다."""
     path = args.cache
     if not os.path.exists(path):
         raise SystemExit(f"캐시 파일이 없습니다: {path}")
     rows = [l for l in open(path, encoding="utf-8") if l.strip()]
     keep, move = [], []
     for l in rows:
-        (keep if json.loads(l)["sid"].startswith("adaplan_M3") else move).append(l)
-    print(f"전체 {len(rows)}행 → 남김 {len(keep)}행(M3 계열), 보관함으로 이동 {len(move)}행")
+        (keep if json.loads(l)["sid"] in (BASELINE.sid, ADAPT.sid) else move).append(l)
+    print(f"전체 {len(rows)}행 → 남김 {len(keep)}행(기준·ADaPT), 보관함으로 이동 {len(move)}행")
     if not move:
         return
     shutil.copy2(path, path + ".bak")

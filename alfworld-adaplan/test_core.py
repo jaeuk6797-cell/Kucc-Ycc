@@ -233,7 +233,7 @@ def test_prune_keeps_m3_and_counts_spend(tmp_path):
     _, before = run.load_cache(str(c))
     run.prune(SimpleNamespace(cache=str(c)))
     cache, after = run.load_cache(str(c))
-    assert {k[0] for k in cache} == {"adaplan_M3", "adaplan_M3_adapt", "adaplan_M3_adapt_nohint"}
+    assert {k[0] for k in cache} == {"adaplan_M3", "adaplan_M3_adapt"}
     assert abs(before - after) < 1e-12 and (tmp_path / "c.jsonl.bak").exists()
     run.prune(SimpleNamespace(cache=str(c)))      # 두 번째 실행은 아무것도 안 옮김
 
