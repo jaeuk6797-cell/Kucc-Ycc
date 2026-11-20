@@ -304,6 +304,35 @@ def test_diagnose_runs(tmp_path, capsys):
     assert "adaplan_M1" in out and "50.0%" in out
 
 
+def test_planner_router_roles_and_signature():
+    from llm import RoleRouter
+    calls = []
+
+    class Tag:
+        def __init__(self, name):
+            self.name = name
+
+        def chat(self, role, system, user, temperature=0.0):
+            calls.append((self.name, role))
+            return Reply("Step 1: a\nStep 2: b" if role in ("plan", "refine") else "Step: 1\nAction: look", 3)
+    router = RoleRouter(Tag("main"), Tag("planner"))
+    run_episode(FakeEnv(), router, run.ADAPT, 0, RunConfig(max_steps=12))
+    assert all(n == "planner" for n, r in calls if r in ("plan", "refine"))
+    assert all(n == "main" for n, r in calls if r == "act")
+    assert any(r == "refine" for _, r in calls)
+    a = SimpleNamespace(model="m", effort="low", split="s", max_steps=40, mock=False)
+    b = SimpleNamespace(model="m", effort="low", split="s", max_steps=40, mock=False, planner_model="llama3.1:8b")
+    c = SimpleNamespace(model="m", effort="low", split="s", max_steps=40, mock=False, planner_model=None)
+    assert run.signature(a, run.BASELINE) == run.signature(c, run.BASELINE)       # 지정 안 하면 기존 서명 그대로
+    assert run.signature(a, run.BASELINE) != run.signature(b, run.BASELINE)
+
+
+def test_register_price():
+    import cost
+    cost.register_price("llama-test", 0.05, 0.08)
+    assert abs(cost.call_cost("llama-test", 1_000_000, 1_000_000) - 0.13) < 1e-9
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

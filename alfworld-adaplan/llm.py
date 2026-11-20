@@ -40,17 +40,19 @@ class OpenAICompatLLM:
     """
 
     def __init__(self, model: str, base_url: str | None = None, api_key: str | None = None,
-                 max_tokens: int = 512):
+                 max_tokens: int = 1024):
         from openai import OpenAI   # 실제 실행할 때만 필요하므로 여기서 불러온다
 
         self.client = OpenAI(
             base_url=base_url or os.environ.get("OPENAI_BASE_URL"),
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "EMPTY"),
+            max_retries=6,
         )
         self.model = model
         self.max_tokens = max_tokens
 
     def chat(self, role: str, system: str, user: str, temperature: float = 0.0) -> Reply:
+        METER.check()   # 예산 한도에 닿았으면 멈춘다
         r = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -61,8 +63,21 @@ class OpenAICompatLLM:
         u = r.usage
         tokens = u.prompt_tokens + u.completion_tokens if u else (len(system) + len(user) + len(text)) // 4
         if u:
-            METER.add("local", role, u.prompt_tokens, u.completion_tokens)
+            METER.add(self.model, role, u.prompt_tokens, u.completion_tokens)
         return Reply(text, tokens)
+
+
+class RoleRouter:
+    """역할별로 다른 LLM에 보낸다. 계획·분해(plan, refine)는 planner, 나머지(act 등)는 main."""
+
+    PLANNER_ROLES = ("plan", "refine")
+
+    def __init__(self, main: LLM, planner: LLM):
+        self.main, self.planner = main, planner
+
+    def chat(self, role: str, system: str, user: str, temperature: float = 0.0) -> Reply:
+        target = self.planner if role in self.PLANNER_ROLES else self.main
+        return target.chat(role, system, user, temperature)
 
 
 class AnthropicLLM:

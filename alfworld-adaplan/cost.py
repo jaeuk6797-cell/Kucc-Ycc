@@ -24,6 +24,12 @@ PRICES = {
 DEFAULT_MODEL = "claude-haiku-5-5"
 
 
+def register_price(model: str, in_per_m: float, out_per_m: float) -> None:
+    """다른 모델(예: 계획용 Llama)의 단가를 등록한다. 100K 초과 구간 구분과 캐시 단가는 없다고 본다."""
+    row = {"in": in_per_m, "out": out_per_m, "cache_read": in_per_m, "cache_write": in_per_m}
+    PRICES[model] = {"short": dict(row), "long": dict(row)}
+
+
 class BudgetExceeded(RuntimeError):
     pass
 

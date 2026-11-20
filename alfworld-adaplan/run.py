@@ -118,8 +118,14 @@ def make_env(args):
 def make_llm_for(args):
     if args.mock:
         return lambda i: RandomLLM(i)                     # noqa: E731
-    from llm import AnthropicLLM
+    from llm import AnthropicLLM, OpenAICompatLLM, RoleRouter
     llm = AnthropicLLM(args.model, effort=args.effort)
+    planner = getattr(args, "planner_model", None)
+    if planner:                                           # 계획·분해만 다른 모델(예: Llama-3.1-8B)로
+        from cost import register_price
+        register_price(planner, args.planner_price_in, args.planner_price_out)
+        key = os.environ.get(args.planner_key_env, "EMPTY")      # Ollama처럼 키가 필요 없으면 EMPTY
+        llm = RoleRouter(llm, OpenAICompatLLM(planner, base_url=args.planner_base_url, api_key=key))
     return lambda i: llm                                  # noqa: E731
 
 
@@ -130,9 +136,12 @@ def pick_tasks(num_games: int, n: int, seed: int) -> list[int]:
 
 def signature(args, strat: Strategy) -> str:
     """캐시 키: 결과에 영향을 주는 설정이 하나라도 다르면 다른 결과로 본다."""
-    raw = json.dumps({"model": args.model if not args.mock else "mock", "effort": args.effort,
-                      "split": args.split, "max_steps": args.max_steps, "code": CODE_VERSION,
-                      "strategy": strat.key()}, sort_keys=True, default=str)
+    d = {"model": args.model if not args.mock else "mock", "effort": args.effort,
+         "split": args.split, "max_steps": args.max_steps, "code": CODE_VERSION,
+         "strategy": strat.key()}
+    if getattr(args, "planner_model", None):          # 지정하지 않으면 키에 안 넣어 기존 캐시 서명이 그대로
+        d["planner"] = args.planner_model
+    raw = json.dumps(d, sort_keys=True, default=str)
     return hashlib.md5(raw.encode()).hexdigest()[:10]
 
 
@@ -344,7 +353,8 @@ def save_report(args, text: str, extra: str = "") -> str | None:
     path = os.path.join(out_dir, f"{args.cmd}_{stamp}_n{args.n}_r{args.reps}.md")
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# {args.cmd} 결과 ({stamp})\n\n"
-                f"명령: n={args.n} reps={args.reps} seed={args.seed} split={args.split} model={args.model}\n\n"
+                f"명령: n={args.n} reps={args.reps} seed={args.seed} split={args.split} model={args.model}"
+                f"{' planner=' + args.planner_model if getattr(args, 'planner_model', None) else ''}\n\n"
                 f"```\n{text.strip()}\n```\n{extra}")
     print(f"[저장] {path}")
     if getattr(args, "push", False):
@@ -552,6 +562,12 @@ def main() -> None:
                     help="ALFWorld 임시 파일을 쌓을 폴더. 환경변수 ADAPLAN_TMP으로도 지정 (예: /mnt/d/kucc_tmp)")
     ap.add_argument("--arms", default=None,
                     help="compare/ablate: 추가로 돌릴 전략 이름(쉼표). 예: adaplan_M1,adaplan_M2. 'all'이면 비교군 전부")
+    ap.add_argument("--planner-model", default=None,
+                    help="계획·분해 호출만 이 모델로 보냄(OpenAI 호환 서버). 예: llama3.1:8b. 행동 호출은 --model")
+    ap.add_argument("--planner-base-url", default=None, help="예: http://localhost:11434/v1 (Ollama)")
+    ap.add_argument("--planner-key-env", default="PLANNER_API_KEY", help="계획 모델 API 키가 든 환경변수 이름 (없으면 키 없이)")
+    ap.add_argument("--planner-price-in", type=float, default=0.05, help="계획 모델 입력 단가 USD/100만 토큰 (직접 확인해서 지정)")
+    ap.add_argument("--planner-price-out", type=float, default=0.08, help="계획 모델 출력 단가 USD/100만 토큰")
     ap.add_argument("--workers", type=int, default=1, help="동시에 돌릴 작업 프로세스 수 (권장 3, API 속도 제한 주의)")
     ap.add_argument("--push", action="store_true", help="결과 파일을 git commit + push (실패해도 무시)")
     ap.add_argument("--task", type=int, default=None, help="show: 과제 번호")
