@@ -281,6 +281,71 @@ def test_interaction_lines():
     assert "있어야 계산 가능" in run.interaction_lines({"adaplan_M3": {}})[0]
 
 
+class ScriptedBase:
+    """게임마다 'go' 두 번이면 성공, 게임 번호 3은 환경이 성공 없이 끝냄. 몇 번 reset됐는지 기록."""
+    num_games = 12
+
+    def __init__(self):
+        self.cur, self.n, self.resets = 0, 0, []
+
+    def reset(self, idx):
+        self.cur, self.n = idx, 0
+        self.resets.append(idx)
+        return f"room of game {idx}.", f"goal {idx}"
+
+    def available(self):
+        return {"commands": ["go", "look"]}
+
+    def step(self, a):
+        self.n += 1
+        if self.cur == 3 and self.n == 2:
+            return "time up", 0.0, True
+        if a == "go" and self.n >= 2:
+            return "done", 1.0, True
+        return "ok", 0.0, False
+
+    def task_type(self, idx):
+        return "heat" if idx % 2 == 0 else "look_at"
+
+
+def test_chain_env_flow():
+    import envs
+    base = ScriptedBase()
+    env = envs.ChainEnv(base, 3, seed=0)
+    assert env.num_games == 4 and env.task_type(0) == "chain3"
+    flat = [g for c in env.chains for g in c]
+    assert sorted(flat) == list(range(12))                                  # 겹침 없이 전부 한 번씩
+    assert envs.ChainEnv(ScriptedBase(), 3, seed=0).chains == env.chains     # 같은 시드면 같은 묶음
+    obs, instr = env.reset(0)
+    assert "ALL 3 tasks" in instr and instr.count("\n") == 3 and "[Task 1/3]" in obs
+    rewards, done, text = [], False, ""
+    while not done:
+        obs, r, done = env.step("go")
+        rewards.append(r); text += obs
+    assert "Task 2/3 starts now" in text and rewards[-1] in (1.0, 2 / 3)       # 게임 3이 묶음에 있으면 2/3
+    if 3 not in env.chains[0]:
+        assert rewards[-1] == 1.0
+    ch3 = next(i for i, c in enumerate(env.chains) if 3 in c)
+    env.reset(ch3)
+    done = False
+    while not done:
+        obs, r, done = env.step("go")
+    assert r == 2 / 3                                                          # 성공 없이 끝난 게임은 실패로 치고 이어감
+    pooled = envs.ChainEnv(ScriptedBase(), 2, seed=0, pool=[0, 2, 4, 6])
+    assert pooled.num_games == 2 and {g for c in pooled.chains for g in c} == {0, 2, 4, 6}
+
+
+def test_chain_signature_and_wrap():
+    a = SimpleNamespace(model="m", effort="low", split="s", max_steps=100, mock=False, chain=0, seed=0, types=None)
+    b = SimpleNamespace(**{**vars(a), "chain": 5})
+    c = SimpleNamespace(**{**vars(b), "seed": 1})
+    assert run.signature(a, run.BASELINE) != run.signature(b, run.BASELINE) != run.signature(c, run.BASELINE)
+    assert run.signature(a, run.BASELINE) == run.signature(SimpleNamespace(model="m", effort="low", split="s", max_steps=100, mock=False), run.BASELINE)
+    env = run.wrap_chain(ScriptedBase(), SimpleNamespace(chain=3, seed=0, types="heat"))
+    assert env.num_games == 2 and all(ScriptedBase().task_type(g) == "heat" for c in env.chains for g in c)     # 유형 풀 6개 → 2묶음
+    assert run.wrap_chain(ScriptedBase(), SimpleNamespace(chain=0)).__class__ is ScriptedBase
+
+
 def test_prune_keeps_m3_and_counts_spend(tmp_path):
     import json
     c = tmp_path / "c.jsonl"

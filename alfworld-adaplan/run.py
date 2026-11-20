@@ -107,12 +107,23 @@ def paired_diff_ci(pairs: list[tuple[int, int]], iters: int = 5000, seed: int = 
 
 # ---------------------------------------------------------------- 실행 보조
 
+def wrap_chain(base, args):
+    """--chain k이면 연속 k개 게임을 한 에피소드로 묶는다(--types가 있으면 그 유형의 게임만 묶음)."""
+    k = getattr(args, "chain", 0) or 0
+    if not k:
+        return base
+    from envs import ChainEnv
+    ok = type_filter(args)
+    pool = [i for i in range(base.num_games) if ok(base.task_type(i))] if getattr(args, "types", None) else None
+    return ChainEnv(base, k, args.seed, pool)
+
+
 def make_env(args):
     if os.environ.get("ADAPLAN_FAKE_ENV"):                # 테스트용: ALFWorld 없이 흐름만 확인
         from test_core import FakeEnv
-        return FakeEnv()
+        return wrap_chain(FakeEnv(), args)
     from envs import ALFWorldEnv
-    return ALFWorldEnv(split=args.split)
+    return wrap_chain(ALFWorldEnv(split=args.split), args)
 
 
 def make_llm_for(args):
@@ -162,6 +173,8 @@ def signature(args, strat: Strategy) -> str:
     d = {"model": args.model if not args.mock else "mock", "effort": args.effort,
          "split": args.split, "max_steps": args.max_steps, "code": CODE_VERSION,
          "strategy": strat.key()}
+    if getattr(args, "chain", 0):                     # 합성 번호는 시드·유형 풀에 따라 달라지므로 함께 키에 넣음
+        d["chain"] = [args.chain, args.seed, getattr(args, "types", None)]
     if getattr(args, "planner_model", None):          # 지정하지 않으면 키에 안 넣어 기존 캐시 서명이 그대로
         d["planner"] = args.planner_model
     raw = json.dumps(d, sort_keys=True, default=str)
@@ -446,16 +459,18 @@ def ablate(args) -> None:
     sigs = {signature(args, s): s for s in arms}
     res = {s.sid: {} for s in arms}
     cost = {s.sid: 0.0 for s in arms}
-    ok_type = type_filter(args)
+    rew = {s.sid: 0.0 for s in arms}
+    ok_type = (lambda tt: True) if getattr(args, "chain", 0) else type_filter(args)      # chain이면 유형은 합성 안에서 이미 적용됨
     for (sid, t, rep, sig), r in cache.items():
         if sig in sigs and sigs[sig].sid == sid and ok_type(r.get("ttype")):
             res[sid][(t, rep)] = int(r["success"])
             cost[sid] += r.get("cost_usd", 0.0)
+            rew[sid] += r.get("reward", 0.0)
     done = [k for v in res.values() for k in v]
     if done:
         args.n, args.reps = len({t for t, _ in done}), max(rep for _, rep in done) + 1     # 결과 파일 이름용
     lines = [f"\n전략 비교 (split={args.split}{', 유형=' + args.types if getattr(args, 'types', None) else ''}, 과제 단위 평균, 과제 부트스트랩 95%)",
-             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}{'$/에피소드':>11}{'$/성공':>9}   {'vs adaplan_M3':<38}{'vs adaplan_M3_adapt':<38}" + ("vs adaplan_M1" if any(x.sid == "adaplan_M1" for x in arms) else "")]
+             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}{'$/에피소드':>11}{'$/성공':>9}{'평균보상':>9}   {'vs adaplan_M3':<38}{'vs adaplan_M3_adapt':<38}" + ("vs adaplan_M1" if any(x.sid == "adaplan_M1" for x in arms) else "")]
     def cmp(a, b):
         ks = sorted(set(res[a]) & set(res[b]))
         diffs = defaultdict(list)
@@ -476,7 +491,7 @@ def ablate(args) -> None:
         m1 = "" if s.sid == "adaplan_M1" or not any(x.sid == "adaplan_M1" for x in arms) else cmp(s.sid, "adaplan_M1")
         n_ok = sum(rs.values())
         per_ok = f"{cost[s.sid] / n_ok:>9.4f}" if n_ok else f"{'-':>9}"
-        lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}{cost[s.sid] / len(rs):>11.4f}{per_ok}   {base:<38}{adp:<38}{m1}")
+        lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}{cost[s.sid] / len(rs):>11.4f}{per_ok}{rew[s.sid] / len(rs):>9.2f}   {base:<38}{adp:<38}{m1}")
     if getattr(args, "interaction", False):
         lines += [""] + interaction_lines(res)
     text = "\n".join(lines) + "\n"
@@ -490,7 +505,7 @@ def diagnose(args) -> None:
     arms = [BASELINE, ADAPT] + [x for x in EXTRA if not args.arms or args.arms == "all" or x.sid in args.arms.split(",")]
     sigs = {signature(args, s): s.sid for s in arms}
     rows = defaultdict(list)
-    ok_type = type_filter(args)
+    ok_type = (lambda tt: True) if getattr(args, "chain", 0) else type_filter(args)
     for (sid, t, rep, sig), r in cache.items():
         if sigs.get(sig) == sid and ok_type(r.get("ttype")):
             rows[sid].append(r)
@@ -603,6 +618,8 @@ def main() -> None:
                     help="eval_out_of_distribution(unseen 134) / eval_in_distribution(seen 140)")
     ap.add_argument("--n", type=int, default=5, help="과제 수")
     ap.add_argument("--reps", type=int, default=1, help="같은 과제의 반복 횟수 (모델 비결정성 측정용)")
+    ap.add_argument("--chain", type=int, default=0,
+                    help="k>0이면 게임 k개를 연속으로 푸는 합성 에피소드로 실행(긴 과제 흉내). 성공=전부 풀기. ablate에도 같은 값을 줘야 캐시가 맞음")
     ap.add_argument("--interaction", action="store_true", help="ablate: M×ADaPT 효과와 상호작용(차이의 차이)도 출력 (--arms adaplan_M1,adaplan_M1_adapt 필요)")
     ap.add_argument("--hard-frac", type=float, default=None,
                     help="compare: --types로 거른 과제 중 수납장 수(n_receps)가 큰 상위 비율만 사용 (예: 0.5). 속성표 필요, unseen용")
@@ -672,7 +689,13 @@ def main() -> None:
     llm_for = make_llm_for(args)
     cfg = RunConfig(max_steps=args.max_steps)
     ok_type = type_filter(args)
-    pool = [i for i in range(env.num_games) if ok_type(env.task_type(i))] if getattr(args, "types", None) else None
+    if getattr(args, "chain", 0) and getattr(args, "hard_frac", None):
+        raise SystemExit("[중단] --chain과 --hard-frac은 같이 쓸 수 없습니다.")
+    if getattr(args, "chain", 0) and args.max_steps < 15 * args.chain:
+        print(f"[경고] --chain {args.chain}에 --max-steps {args.max_steps}는 게임당 {args.max_steps / args.chain:.0f}스텝뿐입니다. "
+              f"{20 * args.chain}(게임당 20) 정도를 권장합니다.")
+    pool = [i for i in range(env.num_games) if ok_type(env.task_type(i))] \
+        if getattr(args, "types", None) and not getattr(args, "chain", 0) else None    # chain이면 환경 안에서 이미 유형을 걸렀음
     if getattr(args, "hard_frac", None):
         base = pool if pool is not None else list(range(env.num_games))
         pool = top_by_receps(args.features, base, args.hard_frac, env.task_type)

@@ -53,3 +53,52 @@ class ALFWorldEnv:
 
     def available(self) -> dict:
         return {"commands": self._cmds}
+
+
+class ChainEnv:
+    """게임 k개를 연속으로 풀게 하는 합성 환경 (긴 과제 흉내). 한 세계가 아니라 독립된 게임을 순서대로 여는 방식이다.
+
+    - 합성 번호 c는 시드로 섞은 게임 목록을 k개씩 끊은 c번째 묶음 (같은 시드·풀이면 항상 같음)
+    - 지시문에 k개 목표를 한꺼번에 주고, 한 게임이 끝나면 다음 게임으로 자동 전환(관찰에 새 목표가 나옴)
+    - 보상 = 푼 게임 수 / k (전부 풀면 1.0), 모두 끝났을 때만 종료. 성공 기준은 전부 풀기
+    - 게임이 성공 없이 끝나면(환경 자체 종료) 그 게임은 실패로 치고 다음으로 넘어감
+    """
+
+    def __init__(self, base, k: int, seed: int = 0, pool=None):
+        import random
+        self.base, self.k = base, k
+        pool = list(range(base.num_games)) if pool is None else list(pool)
+        perm = random.Random(seed).sample(pool, len(pool))
+        self.chains = [perm[i * k:(i + 1) * k] for i in range(len(pool) // k)]
+        self.num_games = len(self.chains)
+        self._games: list[int] = []
+        self._i = self._solved = 0
+
+    def task_type(self, idx: int) -> str:
+        return f"chain{self.k}"
+
+    def reset(self, idx: int) -> tuple[str, str]:
+        self._games = list(self.chains[idx])
+        goals = [self.base.reset(g)[1] for g in self._games]          # 지시문에 쓸 목표만 먼저 훑음
+        body, goal = self.base.reset(self._games[0])
+        self._i = self._solved = 0
+        lines = "\n".join(f"{i}. {g}" for i, g in enumerate(goals, 1))
+        instruction = (f"Complete ALL {self.k} tasks below, in this order. When a task ends, the next one starts "
+                       f"automatically in a new room.\n{lines}")
+        return f"[Task 1/{self.k}] {body}\nYour task is to: {goal}", instruction
+
+    def step(self, action: str) -> tuple[str, float, bool]:
+        obs, r, done = self.base.step(action)
+        if not done:
+            return obs, self._solved / self.k, False
+        won = r >= 1.0
+        self._solved += int(won)
+        self._i += 1
+        if self._i >= self.k:
+            return obs, self._solved / self.k, True
+        body, goal = self.base.reset(self._games[self._i])
+        head = f"[Task {self._i}/{self.k} {'completed' if won else 'ended without success'}. Task {self._i + 1}/{self.k} starts now in a new room.]"
+        return f"{head}\n{body}\nYour task is to: {goal}", self._solved / self.k, False
+
+    def available(self) -> dict:
+        return self.base.available()
