@@ -1,3 +1,4 @@
+import pytest
 """ALFWorld 없이 돌아가는 핵심 로직 테스트.  python test_core.py"""
 
 from types import SimpleNamespace
@@ -251,6 +252,22 @@ def test_pick_tasks_pool_and_types_filter(tmp_path, capsys):
     assert "유형=heat" in out and "$/성공" in out
     line = next(l for l in out.splitlines() if l.startswith("adaplan_M1"))
     assert line.split()[1] == "3" and "100%" in line and "0.0100" in line          # heat 3개만, 전부 성공, 성공당 0.01
+
+
+def test_top_by_receps(tmp_path):
+    import csv
+    f = tmp_path / "f.csv"
+    with open(f, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=["task", "ttype", "plan_len", "n_goto", "n_receps", "needs_tool", "scene", "tier"])
+        w.writeheader()
+        for i, n in enumerate([10, 30, 20, 30, 5, 40]):
+            w.writerow({"task": i, "ttype": "heat", "plan_len": 6, "n_goto": 3, "n_receps": n, "needs_tool": 1, "scene": 1, "tier": 1})
+    tt = lambda i: "heat"                                                          # noqa: E731
+    assert run.top_by_receps(str(f), list(range(6)), 0.5, tt) == [1, 3, 5]          # 상위 3개(40, 30, 30)
+    assert run.top_by_receps(str(f), [0, 1, 2], 0.34, tt) == [1]                    # 풀 안에서만, 최소 1개
+    assert run.top_by_receps(str(f), list(range(6)), 0.4, tt) == [1, 3, 5]          # 경계 동점 포함(상위 2개 컷 30 → 30도 포함)
+    with pytest.raises(SystemExit):
+        run.top_by_receps(str(f), [0, 1], 0.5, lambda i: "cool")                     # 유형 불일치 → 중단
 
 
 def test_prune_keeps_m3_and_counts_spend(tmp_path):

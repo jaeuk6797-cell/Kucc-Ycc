@@ -135,6 +135,22 @@ def pick_tasks(num_games: int, n: int, seed: int, pool=None) -> list[int]:
     return sorted(random.Random(seed).sample(cand, min(n, len(cand))))
 
 
+def top_by_receps(features_csv: str, pool: list[int], frac: float, ttype_of) -> list[int]:
+    """속성표의 수납장 수(n_receps, 탐색 범위)가 큰 쪽 frac 비율만 남긴다(경계 동점은 모두 포함). 에이전트 결과와 무관한 기준.
+    속성표의 유형이 환경의 유형과 다르면(게임 순서가 다른 속성표) 잘못된 과제가 뽑히므로 중단한다."""
+    import csv
+    rows = {int(r["task"]): r for r in csv.DictReader(open(features_csv, encoding="utf-8"))}
+    for t in pool:
+        if t not in rows or rows[t]["ttype"] != ttype_of(t):
+            raise SystemExit(f"[중단] 속성표({features_csv})의 과제 {t} 유형이 환경과 다릅니다. "
+                             f"difficulty.py features로 같은 컴퓨터에서 다시 만드세요.")
+    vals = sorted((int(rows[t]["n_receps"]) for t in pool), reverse=True)
+    if not vals or vals[0] == vals[-1]:
+        raise SystemExit("[중단] 속성표의 n_receps가 없거나 모두 같아 선택 기준으로 쓸 수 없습니다(seen 속성표는 모두 0).")
+    cut = vals[max(1, int(round(len(vals) * frac))) - 1]
+    return [t for t in pool if int(rows[t]["n_receps"]) >= cut]
+
+
 def type_filter(args):
     """--types 'heat,look_at' → 유형 이름에 하나라도 포함되면 통과시키는 함수 (지정 없으면 모두 통과)."""
     keys = [x.strip() for x in (getattr(args, "types", None) or "").split(",") if x.strip()]
@@ -563,6 +579,9 @@ def main() -> None:
                     help="eval_out_of_distribution(unseen 134) / eval_in_distribution(seen 140)")
     ap.add_argument("--n", type=int, default=5, help="과제 수")
     ap.add_argument("--reps", type=int, default=1, help="같은 과제의 반복 횟수 (모델 비결정성 측정용)")
+    ap.add_argument("--hard-frac", type=float, default=None,
+                    help="compare: --types로 거른 과제 중 수납장 수(n_receps)가 큰 상위 비율만 사용 (예: 0.5). 속성표 필요, unseen용")
+    ap.add_argument("--features", default=os.path.join(HERE, "difficulty_features.csv"), help="--hard-frac용 속성표(difficulty.py features로 생성)")
     ap.add_argument("--types", default=None,
                     help="과제 유형 이름에 포함된 문자열(쉼표). 예: heat,look_at,clean,cool. compare는 이 유형만 뽑고, ablate/diagnose는 이 유형 결과만 집계")
     ap.add_argument("--seed", type=int, default=0)
@@ -629,6 +648,10 @@ def main() -> None:
     cfg = RunConfig(max_steps=args.max_steps)
     ok_type = type_filter(args)
     pool = [i for i in range(env.num_games) if ok_type(env.task_type(i))] if getattr(args, "types", None) else None
+    if getattr(args, "hard_frac", None):
+        base = pool if pool is not None else list(range(env.num_games))
+        pool = top_by_receps(args.features, base, args.hard_frac, env.task_type)
+        print(f"[선택] 수납장 수 상위 {args.hard_frac:.0%} → 후보 {len(pool)}개 (속성표 {args.features})")
     tasks = pick_tasks(env.num_games, args.n, args.seed, pool)
     ttypes = {t: env.task_type(t) for t in tasks}
     strategies = [BASELINE] if args.cmd == "pilot" else \
