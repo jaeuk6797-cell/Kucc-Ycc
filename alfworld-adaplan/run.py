@@ -384,7 +384,10 @@ def task_boot(diffs: dict, iters: int = 5000, seed: int = 0):
 def ablate(args) -> None:
     """API 호출 없이 캐시에서 모든 전략을 기준(adaplan_M3)·ADaPT와 과제 단위로 비교한다."""
     cache, _ = load_cache(args.cache)
-    arms = [BASELINE, ADAPT] + [x for x in EXTRA if not args.arms or args.arms == "all" or x.sid in args.arms.split(",") or x.sid == "adaplan_M1"]
+    # 기본은 M=3 계열(기준, ADaPT, 힌트 없음)만. M1/M2/M5 등은 --arms로 직접 지정하거나 all일 때만 (연구 범위에서 제외)
+    want = {x.sid for x in EXTRA if x.sid.startswith("adaplan_M3")} if not args.arms else \
+        ({x.sid for x in EXTRA} if args.arms == "all" else set(args.arms.split(",")))
+    arms = [BASELINE, ADAPT] + [x for x in EXTRA if x.sid in want]
     sigs = {signature(args, s): s for s in arms}
     res = {s.sid: {} for s in arms}
     for (sid, t, rep, sig), r in cache.items():
@@ -394,7 +397,7 @@ def ablate(args) -> None:
     if done:
         args.n, args.reps = len({t for t, _ in done}), max(rep for _, rep in done) + 1     # 결과 파일 이름용
     lines = [f"\n전략 비교 (split={args.split}, 과제 단위 평균, 과제 부트스트랩 95%)",
-             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}   {'vs adaplan_M3':<38}{'vs adaplan_M3_adapt':<38}vs adaplan_M1"]
+             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}   {'vs adaplan_M3':<38}{'vs adaplan_M3_adapt':<38}" + ("vs adaplan_M1" if any(x.sid == "adaplan_M1" for x in arms) else "")]
     def cmp(a, b):
         ks = sorted(set(res[a]) & set(res[b]))
         diffs = defaultdict(list)
@@ -412,10 +415,40 @@ def ablate(args) -> None:
         rate = sum(rs.values()) / len(rs)
         base = "" if s is BASELINE else cmp(s.sid, BASELINE.sid)
         adp = "" if s is ADAPT else cmp(s.sid, ADAPT.sid)
-        m1 = "" if s.sid == "adaplan_M1" else cmp(s.sid, "adaplan_M1")
+        m1 = "" if s.sid == "adaplan_M1" or not any(x.sid == "adaplan_M1" for x in arms) else cmp(s.sid, "adaplan_M1")
         lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}   {base:<38}{adp:<38}{m1}")
     text = "\n".join(lines) + "\n"
     print(text)
+    save_report(args, text, "")
+
+
+def diagnose(args) -> None:
+    """API 호출 없이 전략별 행동 특성을 비교한다 (M이 달라지면 무엇이 달라지는지 가설 점검용)."""
+    cache, _ = load_cache(args.cache)
+    arms = [BASELINE, ADAPT] + [x for x in EXTRA if not args.arms or args.arms == "all" or x.sid in args.arms.split(",")]
+    sigs = {signature(args, s): s.sid for s in arms}
+    rows = defaultdict(list)
+    for (sid, t, rep, sig), r in cache.items():
+        if sigs.get(sig) == sid:
+            rows[sid].append(r)
+    lines = [f"\n전략별 행동 특성 (split={args.split}, 에피소드 평균)",
+             f"{'전략':<26}{'에피소드':>7}{'성공':>6}{'스텝':>6}{'무효명령':>8}{'막힘':>6}{'계획글자':>8}{'입력토큰':>9}{'성공시스텝':>10}{'실패시스텝':>10}"]
+    for s in arms:
+        rs = rows.get(s.sid, [])
+        if not rs:
+            continue
+        acts = [e for r in rs for e in r.get("traj", []) if "expand" not in e]
+        inv = sum(not e["valid"] for e in acts) / max(len(acts), 1)
+        stk = sum(bool(e["stuck"]) for e in acts) / max(len(acts), 1)
+        ok = [r for r in rs if r["success"]]
+        bad = [r for r in rs if not r["success"]]
+        avg = lambda xs, k: sum(x[k] for x in xs) / len(xs) if xs else float("nan")      # noqa: E731
+        plen = sum(len(r.get("plan", "")) for r in rs) / len(rs)
+        lines.append(f"{s.sid:<26}{len(rs):>7}{len(ok)/len(rs):>6.0%}{avg(rs, 'steps'):>6.1f}{inv:>8.1%}{stk:>6.1%}"
+                     f"{plen:>8.0f}{avg(rs, 'in_tokens'):>9.0f}{avg(ok, 'steps'):>10.1f}{avg(bad, 'steps'):>10.1f}")
+    text = "\n".join(lines) + "\n"
+    print(text)
+    args.n = args.n if getattr(args, "n", None) else 0
     save_report(args, text, "")
 
 
@@ -499,7 +532,7 @@ def table(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report", "table", "ablate", "prune"])
+    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report", "table", "ablate", "prune", "diagnose"])
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--model", default="claude-haiku-5-5")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"])
@@ -547,6 +580,9 @@ def main() -> None:
         return
     if args.cmd == "prune":
         prune(args)
+        return
+    if args.cmd == "diagnose":
+        diagnose(args)
         return
 
     cache_path = None if args.mock else args.cache

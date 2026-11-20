@@ -222,6 +222,10 @@ def test_ablate_runs_from_cache(tmp_path, capsys):
     run.ablate(a)
     out = capsys.readouterr().out
     assert "adaplan_M1_adapt" in out and "adaplan_M3_adapt_nohint" in out and "+" in out
+    a.arms = None                                   # 기본값: M3 계열만, M1 열 없음
+    run.ablate(a)
+    out2 = capsys.readouterr().out
+    assert "adaplan_M3_adapt_nohint" in out2 and "adaplan_M1" not in out2
 
 
 def test_prune_keeps_m3_and_counts_spend(tmp_path):
@@ -282,6 +286,22 @@ def test_effect_aborts_when_feature_table_order_differs(tmp_path):
     cache.write_text("\n".join(json.dumps(r) for r in lines), encoding="utf-8")
     text = difficulty.effect_by_tier(str(feats), str(cache), "s", 4, "adaplan_M3", "adaplan_M3_adapt", "claude-haiku-5-5", "low", 40)
     assert "[중단]" in text
+
+
+def test_diagnose_runs(tmp_path, capsys):
+    import json
+    a = SimpleNamespace(model="m", effort="low", split="s", max_steps=40, mock=False, cache=str(tmp_path / "c.jsonl"),
+                        arms="adaplan_M1", n=2, reps=1, cmd="diagnose", out_dir=str(tmp_path), seed=0, push=False)
+    rows = []
+    for s in (run.BASELINE, run.EXTRA[0]):
+        for t in range(2):
+            rows.append({"sid": s.sid, "task": t, "rep": 0, "sig": run.signature(a, s), "success": t == 0, "steps": 5,
+                         "in_tokens": 100, "plan": "<plan 1>\nStep 1: x\n</plan 1>",
+                         "traj": [{"valid": True, "stuck": False}, {"valid": False, "stuck": True}]})
+    (tmp_path / "c.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    run.diagnose(a)
+    out = capsys.readouterr().out
+    assert "adaplan_M1" in out and "50.0%" in out
 
 
 if __name__ == "__main__":
