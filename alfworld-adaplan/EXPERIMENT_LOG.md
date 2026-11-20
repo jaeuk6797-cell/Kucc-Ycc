@@ -14,6 +14,11 @@
 
 ## 1. 진행 기록 (최신 순)
 
+### 2026-11-21 (31) `--hard-frac` 첫 실행 중단: 속성표 유형 불일치 (사용자가 붙여넣은 출력 기준)
+- 출력: `[중단] 속성표(.../difficulty_features.csv)의 과제 0 유형이 환경과 다릅니다`. 환경은 unseen 134 게임을 정상 인식. API 호출 전에 중단되어 비용 없음
+- 원인(확인된 사실 + 추정): 저장소의 `difficulty_features.csv`는 다른 컴퓨터의 게임 순서로 만든 것이고, 직접 복사한 명령(`cp ... difficulty_features.csv`)이 WSL에서 다시 만든 속성표를 덮어썼을 가능성이 높음(추정). 항목 (18)(19)와 같은 종류의 문제
+- 조치: 속성표는 복사하지 않고 WSL에서 `python difficulty.py features --split eval_out_of_distribution --features difficulty_features.csv`로 재생성. 이후 `cp`는 `*.py`만 대상으로 함. 유형 일치 검사가 잘못된 과제 선택을 막은 것을 확인
+
 ### 2026-11-21 (30) 더 어려운 조건 준비: 객관적 상위 난이도 과제 + 스텝 한도 20 (코드만, 실행 전; 사용자가 "둘 다" 선택)
 - 구성: 어려운 유형(heat, look_at, clean, cool) 중 속성표의 수납장 수(`n_receps`, 탐색 범위)가 큰 쪽만 선택(`--hard-frac`, 에이전트 결과와 무관한 기준) + `--max-steps 20`(기존 40). 스텝 한도가 바뀌면 캐시 서명이 달라 모든 전략을 새로 돌려야 함
 - 속성표(unseen, 코드로 계산한 값, 성공률 아님): `plan_len`은 유형 내 고정(pick_two 8, clean·cool·heat 6, look_at·pick_and_place 4)이라 "계획이 가장 긴 과제"는 pick_two가 되는데, 이 유형은 기준 성공률이 94%(항목 (10))로 에이전트에게 쉬움. 앞서 단계와 실패의 상관도 −0.02(항목 (19)). 그래서 plan_len 대신 `n_receps`를 기준으로 삼음
