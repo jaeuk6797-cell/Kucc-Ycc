@@ -14,6 +14,24 @@
 
 ## 1. 진행 기록 (최신 순)
 
+### 2026-11-20 (18) seen 분할 힌트 없는 ADaPT 결과 + 난이도 단계별 효과 (unseen 단계 표는 무효 판정, 사용자가 붙여넣은 출력 기준)
+- **seen 140 task × 2회 `compare` (결과 파일 `/mnt/d/kucc/results/compare_20261120_224213_n140_r2.md`)**
+  - 성공: M=3 기준 205/280 = 73%, M=3 ADaPT 234/280 = 84%, 힌트 없는 ADaPT 213/280 = 76%. 에피소드당 $0.0034 / $0.0036 / $0.0038
+  - 기준 vs ADaPT: ADaPT만 성공 43, 기준만 성공 14, 차이 +10.4%p (부트스트랩 95% +5.4% ~ +15.7%)
+  - 출력값끼리 뺀 값(구간 미계산): 힌트 없음 − 기준 = 8/280 ≈ +2.9%p, ADaPT − 힌트 없음 = 21/280 = +7.5%p. unseen과 같은 방향(분해만 ≈ 작은 이득, 힌트 포함 시 큰 이득). 구간은 `ablate`로 확인 필요
+  - 평균 확장 횟수: ADaPT 0.71, 힌트 없음 0.93. 확장 발동 에피소드 87/280
+  - 같은 전략 재실행 불일치 과제: 기준 19개(14%), ADaPT 22개(16%), 힌트 없음 13개(9%)
+  - 해석(가설): 앞서 (7)·(11)에서 "ADaPT가 막힌 실행을 복구해서 재실행 불일치가 적다(unseen 기준 16% vs ADaPT 9%)"는 가설을 세웠으나, seen에서는 기준 14% vs ADaPT 16%로 반대 방향이라 이 가설은 지지되지 않음
+- **난이도 4단계별 효과(`difficulty.py effect --tiers 4`, 차이 [95%], 과제 단위)**
+  - seen, M=3 ADaPT − 기준: 1단계(48개, plan_len 4) +8.3% [-1.0, +18.8], 3단계(68개, plan_len 6) +9.6% [+1.5, +18.4], 4단계(24개, plan_len 8, pick_two) +16.7% [+2.1, +33.3], 전체 +10.4% [+4.6, +16.1]. 2단계 없음(속성표의 `n_receps`가 모두 0이라 plan_len 3종뿐)
+  - seen, M=1 ADaPT − M=1 기준: 1단계 +10.4% [+4.2, +17.7], 3단계 +5.9% [+0.7, +11.0], 4단계 +12.5% [+2.1, +27.1], 전체 +8.6% [+4.6, +12.9]
+  - 단계 vs 기준 실패율 순위상관: seen M=3 +0.13, seen M=1 +0.03 (거의 0)
+  - 해석(가설): 모든 단계에서 ADaPT 차이가 양수이고 단계가 올라갈수록 커지는 일관된 경향은 없음. 이 단계 정의(계획 길이)는 실제 실패를 거의 설명하지 못함. 단계별 구간이 넓음
+- **unseen 단계 표(`effect --tiers 4`, 출력 1~4단계)는 무효**: 4단계(유형 pick_two 17개)의 기준 성공률이 74%로 나왔으나, 같은 캐시의 유형별 집계에서는 pick_two 기준 32/34 = 94%. 1단계(look 18 + pick_and 9)의 기준 85%도 유형별 집계로는 나올 수 없는 값(look 26/36=72%). seen은 pick_two 기준 37/48 = 77%로 단계 표와 일치함. 따라서 unseen 속성표(`difficulty_features.csv`)의 과제 번호가 실험 때의 게임 순서와 다른 것으로 판단됨(가설: 표를 다른 환경에서 만들어 복사됨, ALFWorld는 폴더 순회 순서를 그대로 쓰고 셔플하지 않음)
+- 조치: `effect`가 속성표의 유형과 캐시(`ttype`)의 유형을 비교해 하나라도 다르면 `[중단]`하도록 수정. unseen 속성표는 같은 컴퓨터에서 다시 생성 필요: `python difficulty.py features --split eval_out_of_distribution --features difficulty_features.csv`. 재생성 후 unseen 단계 분석 재실행
+- 정정: (10)에서 "이득이 기준이 자주 실패하는 task에 몰림"은 기준 자신의 결과로 task를 나눈 것이라 평균으로의 회귀 때문에 부풀 수 있음(선택 편향). 에이전트 비의존 단계로는 이 집중이 확인되지 않음
+- 테스트 16개 통과
+
 ### 2026-11-20 (17) 에이전트 비의존 난이도 4단계별 ADaPT 효과 분석 코드 추가 (실행 전)
 - 멘토 피드백(난이도 정의가 agent에 의존하면 순환적) 대응. `difficulty.py effect --tiers 4`: 과제 파일 속성(전문가 계획 길이 `plan_len`, 수납장 수 `n_receps`)으로 과제를 4단계로 나누고, 단계별로 (처치 - 기준) 성공률 차이와 과제 부트스트랩 95% 구간을 출력(API 비용 없음). 캐시에서 서명으로 split을 걸러 seen/unseen이 섞이지 않음. 결과는 `<out-dir>/results/tiers_*.md`로 저장
 - 동점 처리: `plan_len`·`n_receps`가 같은 과제는 같은 단계(`assign_tiers_tied`). 기존 `assign_tiers`/CSV의 `tier` 열은 그대로 둠
@@ -239,7 +257,8 @@
 - [x] 비교군 실행 및 `ablate` (위 (13))
 - [ ] `ablate` 재실행으로 M1_adapt vs M1 직접 비교(구간) 확인 (API 비용 없음, 코드 동기화 필요)
 - [x] seen 분할 확인 실행 (위 (16))
-- [ ] `difficulty.py effect --tiers 4` 실행(unseen, seen)해 결과 확인
-- [ ] seen 분할에서 힌트 없는 ADaPT(`--arms adaplan_M3_adapt_nohint`) 실행해 분해·힌트 몫 분리
+- [x] seen 분할 `difficulty.py effect --tiers 4` 실행 (위 (18))
+- [ ] unseen 속성표 재생성 후 `effect --tiers 4` 재실행
+- [x] seen 분할 힌트 없는 ADaPT 실행 (위 (18)), [ ] `ablate --split eval_in_distribution --n 140 --reps 2 --arms adaplan_M3_adapt_nohint`로 구간 확인
 - [ ] (선택) 2회차 완료 후 `table`로 과제 단위 평균·부호검정 재집계
 - [ ] 멘토 피드백 항목 정리 (동적 K, 팁 생성 베이스라인, 한 문장 주장, Condition B 설명 수정)

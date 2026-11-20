@@ -265,6 +265,25 @@ def test_effect_by_tier(tmp_path):
     assert len({r["tier"] for r in rows2}) == 1          # 같은 값은 같은 단계
 
 
+def test_effect_aborts_when_feature_table_order_differs(tmp_path):
+    import csv, json
+    import difficulty
+    feats = tmp_path / "f.csv"
+    rows = [{"task": i, "ttype": "look_at_obj_in_light", "plan_len": 4, "n_goto": 2, "n_receps": 10, "needs_tool": 0,
+             "scene": 1, "tier": 1} for i in range(6)]
+    with open(feats, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    a = SimpleNamespace(model="claude-haiku-5-5", effort="low", split="s", max_steps=40, mock=False)
+    cache = tmp_path / "c.jsonl"
+    lines = [{"sid": s.sid, "task": t, "rep": 0, "sig": run.signature(a, s), "success": True, "ttype": "pick_two_obj_and_place"}
+             for t in range(6) for s in (run.BASELINE, run.ADAPT)]
+    cache.write_text("\n".join(json.dumps(r) for r in lines), encoding="utf-8")
+    text = difficulty.effect_by_tier(str(feats), str(cache), "s", 4, "adaplan_M3", "adaplan_M3_adapt", "claude-haiku-5-5", "low", 40)
+    assert "[중단]" in text
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

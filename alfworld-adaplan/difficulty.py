@@ -157,11 +157,20 @@ def effect_by_tier(features_csv: str, cache_path: str, split: str, k: int, base_
     a = SimpleNamespace(model=model, effort=effort, split=split, max_steps=max_steps, mock=False)
     sig = {sid: run.signature(a, run.STRATS[sid]) for sid in (base_sid, treat_sid)}
     succ = {sid: defaultdict(dict) for sid in sig}
+    ttype_cache: dict[int, str] = {}
     for line in open(cache_path, encoding="utf-8"):
         if line.strip():
             r = json.loads(line)
             if r["sid"] in sig and r.get("sig") == sig[r["sid"]]:
                 succ[r["sid"]][r["task"]][r.get("rep", 0)] = int(r["success"])
+                if r.get("ttype"):
+                    ttype_cache[r["task"]] = r["ttype"]
+    # 속성표의 과제 번호가 실험 때의 과제 번호와 같은 게임인지 확인한다 (유형이 하나라도 다르면 순서가 다른 표)
+    bad = [t for t, tt in ttype_cache.items() if t in feats and feats[t]["ttype"] != tt]
+    if bad:
+        return (f"\n[중단] 속성표({features_csv})의 과제 유형이 실험 결과와 {len(bad)}/{len(ttype_cache)}개 과제에서 다릅니다.\n"
+                f"표가 다른 게임 순서로 만들어진 것입니다. 같은 컴퓨터에서 다시 만드세요:\n"
+                f"  python difficulty.py features --split {split} --features {features_csv}")
     out = [f"\n난이도 단계별 효과: {treat_sid} - {base_sid} (split={split}, 단계 {k}개, 과제 단위, 과제 부트스트랩 95%)"]
     tasks = sorted(t for t in feats if t in succ[base_sid] and t in succ[treat_sid])
     if not tasks:
