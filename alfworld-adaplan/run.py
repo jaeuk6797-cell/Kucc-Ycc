@@ -129,9 +129,16 @@ def make_llm_for(args):
     return lambda i: llm                                  # noqa: E731
 
 
-def pick_tasks(num_games: int, n: int, seed: int) -> list[int]:
-    """과제 순서가 유형별로 뭉쳐 있어서, 고정 시드로 무작위 추출해 유형이 섞이게 한다."""
-    return sorted(random.Random(seed).sample(range(num_games), min(n, num_games)))
+def pick_tasks(num_games: int, n: int, seed: int, pool=None) -> list[int]:
+    """과제 순서가 유형별로 뭉쳐 있어서, 고정 시드로 무작위 추출해 유형이 섞이게 한다. pool이 있으면 그 안에서만 뽑는다."""
+    cand = list(range(num_games)) if pool is None else list(pool)
+    return sorted(random.Random(seed).sample(cand, min(n, len(cand))))
+
+
+def type_filter(args):
+    """--types 'heat,look_at' → 유형 이름에 하나라도 포함되면 통과시키는 함수 (지정 없으면 모두 통과)."""
+    keys = [x.strip() for x in (getattr(args, "types", None) or "").split(",") if x.strip()]
+    return (lambda tt: any(k in (tt or "") for k in keys)) if keys else (lambda tt: True)
 
 
 def signature(args, strat: Strategy) -> str:
@@ -400,14 +407,17 @@ def ablate(args) -> None:
     arms = [BASELINE, ADAPT] + [x for x in EXTRA if x.sid in want]
     sigs = {signature(args, s): s for s in arms}
     res = {s.sid: {} for s in arms}
+    cost = {s.sid: 0.0 for s in arms}
+    ok_type = type_filter(args)
     for (sid, t, rep, sig), r in cache.items():
-        if sig in sigs and sigs[sig].sid == sid:
+        if sig in sigs and sigs[sig].sid == sid and ok_type(r.get("ttype")):
             res[sid][(t, rep)] = int(r["success"])
+            cost[sid] += r.get("cost_usd", 0.0)
     done = [k for v in res.values() for k in v]
     if done:
         args.n, args.reps = len({t for t, _ in done}), max(rep for _, rep in done) + 1     # 결과 파일 이름용
-    lines = [f"\n전략 비교 (split={args.split}, 과제 단위 평균, 과제 부트스트랩 95%)",
-             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}   {'vs adaplan_M3':<38}{'vs adaplan_M3_adapt':<38}" + ("vs adaplan_M1" if any(x.sid == "adaplan_M1" for x in arms) else "")]
+    lines = [f"\n전략 비교 (split={args.split}{', 유형=' + args.types if getattr(args, 'types', None) else ''}, 과제 단위 평균, 과제 부트스트랩 95%)",
+             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}{'$/에피소드':>11}{'$/성공':>9}   {'vs adaplan_M3':<38}{'vs adaplan_M3_adapt':<38}" + ("vs adaplan_M1" if any(x.sid == "adaplan_M1" for x in arms) else "")]
     def cmp(a, b):
         ks = sorted(set(res[a]) & set(res[b]))
         diffs = defaultdict(list)
@@ -426,7 +436,9 @@ def ablate(args) -> None:
         base = "" if s is BASELINE else cmp(s.sid, BASELINE.sid)
         adp = "" if s is ADAPT else cmp(s.sid, ADAPT.sid)
         m1 = "" if s.sid == "adaplan_M1" or not any(x.sid == "adaplan_M1" for x in arms) else cmp(s.sid, "adaplan_M1")
-        lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}   {base:<38}{adp:<38}{m1}")
+        n_ok = sum(rs.values())
+        per_ok = f"{cost[s.sid] / n_ok:>9.4f}" if n_ok else f"{'-':>9}"
+        lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}{cost[s.sid] / len(rs):>11.4f}{per_ok}   {base:<38}{adp:<38}{m1}")
     text = "\n".join(lines) + "\n"
     print(text)
     save_report(args, text, "")
@@ -438,8 +450,9 @@ def diagnose(args) -> None:
     arms = [BASELINE, ADAPT] + [x for x in EXTRA if not args.arms or args.arms == "all" or x.sid in args.arms.split(",")]
     sigs = {signature(args, s): s.sid for s in arms}
     rows = defaultdict(list)
+    ok_type = type_filter(args)
     for (sid, t, rep, sig), r in cache.items():
-        if sigs.get(sig) == sid:
+        if sigs.get(sig) == sid and ok_type(r.get("ttype")):
             rows[sid].append(r)
     lines = [f"\n전략별 행동 특성 (split={args.split}, 에피소드 평균)",
              f"{'전략':<26}{'에피소드':>7}{'성공':>6}{'스텝':>6}{'무효명령':>8}{'막힘':>6}{'계획글자':>8}{'입력토큰':>9}{'성공시스텝':>10}{'실패시스텝':>10}"]
@@ -550,6 +563,8 @@ def main() -> None:
                     help="eval_out_of_distribution(unseen 134) / eval_in_distribution(seen 140)")
     ap.add_argument("--n", type=int, default=5, help="과제 수")
     ap.add_argument("--reps", type=int, default=1, help="같은 과제의 반복 횟수 (모델 비결정성 측정용)")
+    ap.add_argument("--types", default=None,
+                    help="과제 유형 이름에 포함된 문자열(쉼표). 예: heat,look_at,clean,cool. compare는 이 유형만 뽑고, ablate/diagnose는 이 유형 결과만 집계")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-steps", type=int, default=40)
     ap.add_argument("--budget", type=float, default=CFG["budget_usd"])
@@ -612,7 +627,9 @@ def main() -> None:
     env = make_env(args)
     llm_for = make_llm_for(args)
     cfg = RunConfig(max_steps=args.max_steps)
-    tasks = pick_tasks(env.num_games, args.n, args.seed)
+    ok_type = type_filter(args)
+    pool = [i for i in range(env.num_games) if ok_type(env.task_type(i))] if getattr(args, "types", None) else None
+    tasks = pick_tasks(env.num_games, args.n, args.seed, pool)
     ttypes = {t: env.task_type(t) for t in tasks}
     strategies = [BASELINE] if args.cmd == "pilot" else \
         [BASELINE] + ([] if getattr(args, "skip_adapt", False) else [ADAPT]) + extra_arms(args)

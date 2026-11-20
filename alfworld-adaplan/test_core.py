@@ -228,6 +228,31 @@ def test_ablate_runs_from_cache(tmp_path, capsys):
     assert "adaplan_M3_adapt_nohint" in out2 and "adaplan_M1" not in out2
 
 
+def test_pick_tasks_pool_and_types_filter(tmp_path, capsys):
+    import json
+    assert run.pick_tasks(10, 3, 0) == run.pick_tasks(10, 3, 0, None)          # pool 없으면 기존과 동일
+    got = run.pick_tasks(100, 5, 0, pool=[7, 8, 9, 40])
+    assert set(got) <= {7, 8, 9, 40} and len(got) == 4                           # pool보다 많이 요청해도 pool 크기까지만
+    f = run.type_filter(SimpleNamespace(types="heat, look_at"))
+    assert f("pick_heat_then_place_in_recep") and f("look_at_obj_in_light") and not f("pick_two_obj_and_place")
+    assert run.type_filter(SimpleNamespace(types=None))("anything")
+    cache = tmp_path / "c.jsonl"
+    a = SimpleNamespace(model="m", effort="low", split="s", max_steps=40, mock=False, cache=str(cache),
+                        arms="adaplan_M1", n=6, reps=1, cmd="ablate", out_dir=str(tmp_path), seed=0, push=False,
+                        types="heat")
+    rows = []
+    for t in range(6):
+        for s in (run.BASELINE, run.ADAPT, *[x for x in run.EXTRA if x.sid == "adaplan_M1"]):
+            rows.append({"sid": s.sid, "task": t, "rep": 0, "sig": run.signature(a, s), "success": t < 3, "cost_usd": 0.01,
+                         "ttype": "pick_heat_then_place_in_recep" if t < 3 else "pick_two_obj_and_place"})
+    cache.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    run.ablate(a)
+    out = capsys.readouterr().out
+    assert "유형=heat" in out and "$/성공" in out
+    line = next(l for l in out.splitlines() if l.startswith("adaplan_M1"))
+    assert line.split()[1] == "3" and "100%" in line and "0.0100" in line          # heat 3개만, 전부 성공, 성공당 0.01
+
+
 def test_prune_keeps_m3_and_counts_spend(tmp_path):
     import json
     c = tmp_path / "c.jsonl"
