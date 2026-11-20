@@ -353,7 +353,7 @@ def task_boot(diffs: dict, iters: int = 5000, seed: int = 0):
 def ablate(args) -> None:
     """API 호출 없이 캐시에서 모든 전략을 기준(adaplan_M3)·ADaPT와 과제 단위로 비교한다."""
     cache, _ = load_cache(args.cache)
-    arms = [BASELINE, ADAPT] + [x for x in EXTRA if not args.arms or args.arms == "all" or x.sid in args.arms.split(",")]
+    arms = [BASELINE, ADAPT] + [x for x in EXTRA if not args.arms or args.arms == "all" or x.sid in args.arms.split(",") or x.sid == "adaplan_M1"]
     sigs = {signature(args, s): s for s in arms}
     res = {s.sid: {} for s in arms}
     for (sid, t, rep, sig), r in cache.items():
@@ -363,7 +363,7 @@ def ablate(args) -> None:
     if done:
         args.n, args.reps = len({t for t, _ in done}), max(rep for _, rep in done) + 1     # 결과 파일 이름용
     lines = [f"\n전략 비교 (split={args.split}, 과제 단위 평균, 과제 부트스트랩 95%)",
-             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}   vs adaplan_M3 (공통 과제·회차)      vs adaplan_M3_adapt"]
+             f"{'전략':<26}{'에피소드':>8}{'성공률':>8}   {'vs adaplan_M3':<38}{'vs adaplan_M3_adapt':<38}vs adaplan_M1"]
     def cmp(a, b):
         ks = sorted(set(res[a]) & set(res[b]))
         diffs = defaultdict(list)
@@ -381,7 +381,8 @@ def ablate(args) -> None:
         rate = sum(rs.values()) / len(rs)
         base = "" if s is BASELINE else cmp(s.sid, BASELINE.sid)
         adp = "" if s is ADAPT else cmp(s.sid, ADAPT.sid)
-        lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}   {base:<36}{adp}")
+        m1 = "" if s.sid == "adaplan_M1" else cmp(s.sid, "adaplan_M1")
+        lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}   {base:<38}{adp:<38}{m1}")
     text = "\n".join(lines) + "\n"
     print(text)
     save_report(args, text, "")
