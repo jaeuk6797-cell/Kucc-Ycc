@@ -224,6 +224,20 @@ def test_ablate_runs_from_cache(tmp_path, capsys):
     assert "adaplan_M1_adapt" in out and "adaplan_M3_adapt_nohint" in out and "+" in out
 
 
+def test_prune_keeps_m3_and_counts_spend(tmp_path):
+    import json
+    c = tmp_path / "c.jsonl"
+    rows = [{"sid": s, "task": 0, "rep": 0, "sig": "x", "success": True, "cost_usd": 0.01}
+            for s in ("adaplan_M3", "adaplan_M3_adapt", "adaplan_M3_adapt_nohint", "adaplan_M1", "adaplan_M5", "adaplan_M1_adapt")]
+    c.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    _, before = run.load_cache(str(c))
+    run.prune(SimpleNamespace(cache=str(c)))
+    cache, after = run.load_cache(str(c))
+    assert {k[0] for k in cache} == {"adaplan_M3", "adaplan_M3_adapt", "adaplan_M3_adapt_nohint"}
+    assert abs(before - after) < 1e-12 and (tmp_path / "c.jsonl.bak").exists()
+    run.prune(SimpleNamespace(cache=str(c)))      # 두 번째 실행은 아무것도 안 옮김
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

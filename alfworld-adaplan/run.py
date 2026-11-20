@@ -144,7 +144,38 @@ def load_cache(path):
                 row = json.loads(line)
                 cache[(row["sid"], row["task"], row.get("rep", 0), row.get("sig"))] = row
                 spent += row.get("cost_usd", 0.0)
+    arch = archive_path(path)
+    if arch and os.path.exists(arch):          # 보관함으로 옮긴 결과도 이미 쓴 비용이므로 예산 계산에는 포함
+        for line in open(arch, encoding="utf-8"):
+            if line.strip():
+                spent += json.loads(line).get("cost_usd", 0.0)
     return cache, spent
+
+
+def archive_path(path):
+    return os.path.splitext(path)[0] + "_archive.jsonl" if path else None
+
+
+def prune(args) -> None:
+    """캐시에서 M3 계열(adaplan_M3*)만 남기고 나머지 행은 보관 파일로 옮긴다. 백업을 먼저 만들고, 비용은 보관 파일로 계속 센다."""
+    path = args.cache
+    if not os.path.exists(path):
+        raise SystemExit(f"캐시 파일이 없습니다: {path}")
+    rows = [l for l in open(path, encoding="utf-8") if l.strip()]
+    keep, move = [], []
+    for l in rows:
+        (keep if json.loads(l)["sid"].startswith("adaplan_M3") else move).append(l)
+    print(f"전체 {len(rows)}행 → 남김 {len(keep)}행(M3 계열), 보관함으로 이동 {len(move)}행")
+    if not move:
+        return
+    shutil.copy2(path, path + ".bak")
+    with open(archive_path(path), "a", encoding="utf-8") as f:
+        f.writelines(move)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(keep)
+    os.replace(tmp, path)
+    print(f"백업 {path}.bak, 보관 {archive_path(path)} (누적 비용 계산에는 계속 포함)")
 
 
 
@@ -468,7 +499,7 @@ def table(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report", "table", "ablate"])
+    ap.add_argument("cmd", choices=["pilot", "compare", "show", "report", "table", "ablate", "prune"])
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--model", default="claude-haiku-5-5")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"])
@@ -513,6 +544,9 @@ def main() -> None:
         return
     if args.cmd == "ablate":
         ablate(args)
+        return
+    if args.cmd == "prune":
+        prune(args)
         return
 
     cache_path = None if args.mock else args.cache
