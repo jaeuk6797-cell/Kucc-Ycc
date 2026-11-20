@@ -270,6 +270,17 @@ def test_top_by_receps(tmp_path):
         run.top_by_receps(str(f), [0, 1], 0.5, lambda i: "cool")                     # 유형 불일치 → 중단
 
 
+def test_interaction_lines():
+    res = {"adaplan_M3": {(t, 0): int(t < 4) for t in range(10)},
+           "adaplan_M3_adapt": {(t, 0): int(t < 6) for t in range(10)},
+           "adaplan_M1": {(t, 0): int(t < 7) for t in range(10)},
+           "adaplan_M1_adapt": {(t, 0): int(t < 9) for t in range(10)}}
+    out = "\n".join(run.interaction_lines(res))
+    assert "+30.0%p" in out and "+30.0%p [" in out                                   # M1-M3 (꺼짐) = 0.7-0.4
+    assert "상호작용" in out and "+0.0%p" in out                                      # (0.2) - (0.2) = 0
+    assert "있어야 계산 가능" in run.interaction_lines({"adaplan_M3": {}})[0]
+
+
 def test_prune_keeps_m3_and_counts_spend(tmp_path):
     import json
     c = tmp_path / "c.jsonl"

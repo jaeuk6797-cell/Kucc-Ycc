@@ -414,6 +414,28 @@ def task_boot(diffs: dict, iters: int = 5000, seed: int = 0):
     return sum(means) / len(means), bs[int(0.025 * iters)], bs[int(0.975 * iters) - 1]
 
 
+def interaction_lines(res) -> list[str]:
+    """M(1 대 3)과 ADaPT(켜짐 대 꺼짐)의 효과와 상호작용(차이의 차이)을 같은 (과제, 회차)끼리 과제 부트스트랩으로 계산한다."""
+    names = ("adaplan_M3", "adaplan_M3_adapt", "adaplan_M1", "adaplan_M1_adapt")
+    if any(not res.get(n) for n in names):
+        return ["  (M=1/M=3과 각 ADaPT 결과가 모두 있어야 계산 가능: --arms adaplan_M1,adaplan_M1_adapt)"]
+    keys = set.intersection(*[set(res[n]) for n in names])
+    out = [f"  M×ADaPT 효과 (공통 에피소드 {len(keys)}개, 과제 단위 부트스트랩 95%)"]
+    for label, f in [
+        ("M 효과, ADaPT 꺼짐 (M1-M3)", lambda g: g("adaplan_M1") - g("adaplan_M3")),
+        ("M 효과, ADaPT 켜짐 (M1_adapt-M3_adapt)", lambda g: g("adaplan_M1_adapt") - g("adaplan_M3_adapt")),
+        ("ADaPT 효과, M=3 (M3_adapt-M3)", lambda g: g("adaplan_M3_adapt") - g("adaplan_M3")),
+        ("ADaPT 효과, M=1 (M1_adapt-M1)", lambda g: g("adaplan_M1_adapt") - g("adaplan_M1")),
+        ("상호작용 (M1_adapt-M1)-(M3_adapt-M3)", lambda g: (g("adaplan_M1_adapt") - g("adaplan_M1")) - (g("adaplan_M3_adapt") - g("adaplan_M3"))),
+    ]:
+        diffs = defaultdict(list)
+        for t, rep in keys:
+            diffs[t].append(f(lambda n: res[n][(t, rep)]))
+        d, lo, hi = task_boot(diffs)
+        out.append(f"  {label:<42}{d:+7.1%}p [{lo:+.1%}, {hi:+.1%}]")
+    return out
+
+
 def ablate(args) -> None:
     """API 호출 없이 캐시에서 모든 전략을 기준(adaplan_M3)·ADaPT와 과제 단위로 비교한다."""
     cache, _ = load_cache(args.cache)
@@ -455,6 +477,8 @@ def ablate(args) -> None:
         n_ok = sum(rs.values())
         per_ok = f"{cost[s.sid] / n_ok:>9.4f}" if n_ok else f"{'-':>9}"
         lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}{cost[s.sid] / len(rs):>11.4f}{per_ok}   {base:<38}{adp:<38}{m1}")
+    if getattr(args, "interaction", False):
+        lines += [""] + interaction_lines(res)
     text = "\n".join(lines) + "\n"
     print(text)
     save_report(args, text, "")
@@ -579,6 +603,7 @@ def main() -> None:
                     help="eval_out_of_distribution(unseen 134) / eval_in_distribution(seen 140)")
     ap.add_argument("--n", type=int, default=5, help="과제 수")
     ap.add_argument("--reps", type=int, default=1, help="같은 과제의 반복 횟수 (모델 비결정성 측정용)")
+    ap.add_argument("--interaction", action="store_true", help="ablate: M×ADaPT 효과와 상호작용(차이의 차이)도 출력 (--arms adaplan_M1,adaplan_M1_adapt 필요)")
     ap.add_argument("--hard-frac", type=float, default=None,
                     help="compare: --types로 거른 과제 중 수납장 수(n_receps)가 큰 상위 비율만 사용 (예: 0.5). 속성표 필요, unseen용")
     ap.add_argument("--features", default=os.path.join(HERE, "difficulty_features.csv"), help="--hard-frac용 속성표(difficulty.py features로 생성)")
