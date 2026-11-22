@@ -115,7 +115,7 @@ def wrap_chain(base, args):
     from envs import ChainEnv
     ok = type_filter(args)
     pool = [i for i in range(base.num_games) if ok(base.task_type(i))] if getattr(args, "types", None) else None
-    return ChainEnv(base, k, args.seed, pool)
+    return ChainEnv(base, k, args.seed, pool, getattr(args, "chain_count", 0) or 0)
 
 
 def make_env(args):
@@ -174,7 +174,7 @@ def signature(args, strat: Strategy) -> str:
          "split": args.split, "max_steps": args.max_steps, "code": CODE_VERSION,
          "strategy": strat.key()}
     if getattr(args, "chain", 0):                     # 합성 번호는 시드·유형 풀에 따라 달라지므로 함께 키에 넣음
-        d["chain"] = [args.chain, args.seed, getattr(args, "types", None)]
+        d["chain"] = [args.chain, args.seed, getattr(args, "types", None)] + (["ovl"] if getattr(args, "chain_count", 0) else [])
     if getattr(args, "planner_model", None):          # 지정하지 않으면 키에 안 넣어 기존 캐시 서명이 그대로
         d["planner"] = args.planner_model
     raw = json.dumps(d, sort_keys=True, default=str)
@@ -620,6 +620,8 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=1, help="같은 과제의 반복 횟수 (모델 비결정성 측정용)")
     ap.add_argument("--chain", type=int, default=0,
                     help="k>0이면 게임 k개를 연속으로 푸는 합성 에피소드로 실행(긴 과제 흉내). 성공=전부 풀기. ablate에도 같은 값을 줘야 캐시가 맞음")
+    ap.add_argument("--chain-count", type=int, default=0,
+                    help="--chain k와 함께: 합성을 이 개수만큼 겹침 허용으로 만듦(0이면 겹치지 않게 끊음). 예: --chain 20 --chain-count 12")
     ap.add_argument("--interaction", action="store_true", help="ablate: M×ADaPT 효과와 상호작용(차이의 차이)도 출력 (--arms adaplan_M1,adaplan_M1_adapt 필요)")
     ap.add_argument("--hard-frac", type=float, default=None,
                     help="compare: --types로 거른 과제 중 수납장 수(n_receps)가 큰 상위 비율만 사용 (예: 0.5). 속성표 필요, unseen용")

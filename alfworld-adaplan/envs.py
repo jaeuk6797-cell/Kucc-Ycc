@@ -64,12 +64,21 @@ class ChainEnv:
     - 게임이 성공 없이 끝나면(환경 자체 종료) 그 게임은 실패로 치고 다음으로 넘어감
     """
 
-    def __init__(self, base, k: int, seed: int = 0, pool=None):
+    def __init__(self, base, k: int, seed: int = 0, pool=None, count: int = 0):
+        """count=0: 게임을 겹치지 않게 k개씩 끊음(합성 수 = 게임 수 // k).
+        count>0: 합성 c마다 독립적으로 k개를 뽑아 count개를 만듦(합성끼리 게임이 겹칠 수 있음, 한 합성 안에서는 겹치지 않음).
+        겹침 방식은 게임 폴더 경로로 정렬한 뒤 뽑아서, 게임 번호 순서가 다른 컴퓨터에서도 같은 합성이 나온다."""
         import random
         self.base, self.k = base, k
         pool = list(range(base.num_games)) if pool is None else list(pool)
-        perm = random.Random(seed).sample(pool, len(pool))
-        self.chains = [perm[i * k:(i + 1) * k] for i in range(len(pool) // k)]
+        if count:
+            files = getattr(base, "game_files", None)
+            key = (lambda i: files[i].split("json_2.1.1/")[-1]) if files else (lambda i: i)
+            stable = sorted(pool, key=key)
+            self.chains = [random.Random(f"{seed}-{c}").sample(stable, min(k, len(stable))) for c in range(count)]
+        else:
+            perm = random.Random(seed).sample(pool, len(pool))
+            self.chains = [perm[i * k:(i + 1) * k] for i in range(len(pool) // k)]
         self.num_games = len(self.chains)
         self._games: list[int] = []
         self._i = self._solved = 0

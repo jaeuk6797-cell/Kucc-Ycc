@@ -346,6 +346,25 @@ def test_chain_signature_and_wrap():
     assert run.wrap_chain(ScriptedBase(), SimpleNamespace(chain=0)).__class__ is ScriptedBase
 
 
+def test_chain_overlap_mode():
+    import envs
+    base = ScriptedBase()
+    base.game_files = [f"/x/alfworld_data/json_2.1.1/valid_unseen/{11 - i:02d}/game.tw" for i in range(12)]   # 번호 순서와 경로 순서가 반대
+    a = envs.ChainEnv(base, 4, seed=0, count=5)
+    assert a.num_games == 5 and all(len(set(c)) == 4 for c in a.chains)                    # 한 합성 안에서는 안 겹침
+    b = envs.ChainEnv(ScriptedBase(), 4, seed=0, count=3)
+    base2 = ScriptedBase()
+    base2.game_files = [f"/other/json_2.1.1/valid_unseen/{i:02d}/game.tw" for i in range(12)]            # 다른 컴퓨터: 접두 경로와 번호 순서가 다름
+    c = envs.ChainEnv(base2, 4, seed=0, count=5)
+    rel = lambda env, chains: [[env.base.game_files[g].split("json_2.1.1/")[-1] for g in ch] for ch in chains]   # noqa: E731
+    assert rel(a, a.chains) == rel(c, c.chains)                                            # 같은 합성(경로 기준)이 나옴
+    assert envs.ChainEnv(base, 4, seed=0, count=7).chains[:5] == a.chains                  # 합성 c는 count와 무관
+    assert b.num_games == 3
+    x = SimpleNamespace(model="m", effort="low", split="s", max_steps=400, mock=False, chain=20, seed=0, types=None, chain_count=0)
+    y = SimpleNamespace(**{**vars(x), "chain_count": 12})
+    assert run.signature(x, run.BASELINE) != run.signature(y, run.BASELINE)
+
+
 def test_prune_keeps_m3_and_counts_spend(tmp_path):
     import json
     c = tmp_path / "c.jsonl"
