@@ -51,6 +51,11 @@ EXTRA = [Strategy(sid=f"adaplan_M{m}", start_level=m, max_level=m, trigger_n=0) 
     Strategy(sid="adaplan_M1_adapt", start_level=1, max_level=1, trigger_n=3, max_expand=4, scope="local"),
     Strategy(sid="adaplan_M3_adapt_nohint", start_level=M, max_level=M, trigger_n=3, max_expand=4,
              scope="local", hint=False),
+    # 원인 분리 2x2 (M=1): 분해(국소 확장) x 힌트(미방문 장소). M1=둘 다 없음, M1_adapt=둘 다 있음
+    Strategy(sid="adaplan_M1_hintonly", start_level=1, max_level=1, trigger_n=3, max_expand=4, scope="local",
+             hint_only=True),
+    Strategy(sid="adaplan_M1_adapt_nohint", start_level=1, max_level=1, trigger_n=3, max_expand=4, scope="local",
+             hint=False),
 ]
 CODE_VERSION = "4"   # 에이전트 프롬프트/막힘 규칙을 바꾸면 올려서 예전 캐시를 무효화한다
 

@@ -484,3 +484,35 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_hintonly_arm_no_refine_hint_in_act_prompt():
+    class Env(FakeEnv):
+        def available(self):
+            return {"commands": ["look", "go to cabinet 1", "go to desk 2"]}
+
+    class ActLLM(RecordLLM):
+        def __init__(self):
+            super().__init__()
+            self.act_users = []
+            self.roles = []
+
+        def chat(self, role, system, user, temperature=0.0):
+            self.roles.append(role)
+            if role == "act":
+                self.act_users.append(user)
+            return super().chat(role, system, user, temperature)
+    ho = next(s for s in run.EXTRA if s.sid == "adaplan_M1_hintonly")
+    llm = ActLLM()
+    t = run_episode(Env(), llm, ho, 0, RunConfig(max_steps=12))
+    assert "refine" not in llm.roles and not llm.refine_prompts      # 분해 호출 없음
+    assert t.expansions > 0                                          # 힌트 발동은 센다
+    assert any("# Hint" in u and "Not yet visited: cabinet 1, desk 2" in u for u in llm.act_users)
+    assert "# Hint" not in llm.act_users[0]                          # 막히기 전엔 힌트 없음
+    base = ActLLM()
+    run_episode(Env(), base, run.ADAPT, 0, RunConfig(max_steps=12))
+    assert all("# Hint" not in u for u in base.act_users)            # 기존 ADaPT 프롬프트는 그대로
+    # 서명: hint_only는 키가 다르고, 기존 전략 키는 변하지 않음
+    assert ho.key() != Strategy(sid="x", start_level=1, max_level=1, trigger_n=3, max_expand=4, scope="local").key()
+    nh1 = next(s for s in run.EXTRA if s.sid == "adaplan_M1_adapt_nohint")
+    assert nh1.key()[-1] == "nohint" and ho.key()[-1] == "hintonly"

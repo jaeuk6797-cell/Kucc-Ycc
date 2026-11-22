@@ -34,13 +34,15 @@ class Strategy:
     scope: str = "hybrid"         # global / local / hybrid
     rules: tuple[str, ...] = ()   # 계획 프롬프트에 붙일 규칙 (교사가 추가/삭제)
     hint: bool = True             # 확장할 때 "아직 안 간 장소" 목록을 알려 줄지 (False면 힌트 없음: 분리 실험용)
+    hint_only: bool = False       # True면 막힘 때 계획을 나누지 않고 힌트만 행동 프롬프트에 붙임 (분해의 몫 분리 실험용)
 
     def key(self) -> tuple:
         """sid를 뺀 실제 설정값. 같은 내용의 전략을 중복으로 보지 않기 위해 쓴다.
         hint는 기본값(True)이면 키에 넣지 않아, 이미 쌓인 캐시(기존 전략)의 서명이 바뀌지 않는다."""
         k = (self.start_level, self.max_level, self.trigger_n, self.max_expand,
              self.scope, self.rules)
-        return k if self.hint else k + ("nohint",)
+        k = k if self.hint else k + ("nohint",)
+        return k + ("hintonly",) if self.hint_only else k
 
 
 @dataclass(frozen=True)
@@ -189,11 +191,13 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
     steps = expansions = 0
     reward, done = 0.0, False
     traj: list[dict] = []
+    hint_note = ""                # hint_only 전략이 막힘 때 설정하는 힌트 (다음 막힘까지 행동 프롬프트에 유지)
 
     while steps < cfg.max_steps and not done:
         avail = env.available()
         recent = "\n".join(f"> {a}\n{o}" for a, o in history[-cfg.history_len:]) or "(none)"
         user = (f"# Instruction\n{instruction}\n# Plan\n{plan.render()}\n"
+                + (f"# Hint\n{hint_note}\n" if hint_note else "") +
                 f"# Recent history\n{recent}\n# Current observation\n{_short(obs, cfg.obs_chars)}\n"
                 f"# Available commands\n{' | '.join(avail.get('commands', []))}")
         r = llm.chat("act", ACT_SYSTEM, user, temperature=cfg.act_temperature)
@@ -227,6 +231,14 @@ def run_episode(env, llm: LLM, s: Strategy, session: int, cfg: RunConfig) -> Tri
                     + (f"Not yet visited: {', '.join(unvisited) or '(none)'}.\n" if s.hint else "") +
                     f"Last actions:\n" +
                     "\n".join(f"> {a} -> {o[:100]}" for a, o in history[-6:]))
+            if s.hint_only:       # 분해 없이 힌트만: LLM 호출 없음, 계획은 그대로
+                hint_note = (f"You seem stuck on step {step_no}. Places already visited: {', '.join(visited) or '(none)'}. "
+                             f"Not yet visited: {', '.join(unvisited) or '(none)'}. If the target object has not been found yet, "
+                             "go to a place from the 'Not yet visited' list instead of revisiting places or repeating earlier actions.")
+                expansions += 1
+                marks.clear()
+                traj.append({"t": steps, "expand": "hint", "plan_step": step_no})
+                continue
             add_level = s.scope == "global" or (s.scope == "hybrid" and len(plan.levels) < s.max_level)
             if add_level and len(plan.levels) < s.max_level:
                 tokens += make_level(llm, instruction, plan, s.rules, note)
