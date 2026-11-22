@@ -365,6 +365,15 @@ def test_chain_overlap_mode():
     assert run.signature(x, run.BASELINE) != run.signature(y, run.BASELINE)
 
 
+def test_reward_lines():
+    r = {"adaplan_M3": {(t, 0): 0.5 for t in range(8)},
+         "adaplan_M1": {(t, 0): 0.7 for t in range(8)},
+         "adaplan_M2": {}}
+    out = "\n".join(run.reward_lines(r))
+    assert "평균 0.700" in out and "+0.200" in out and "vs M3" in out         # M1은 M3보다 +0.2
+    assert "adaplan_M2" not in out                                            # 결과 없는 전략은 건너뜀
+
+
 def test_prune_keeps_m3_and_counts_spend(tmp_path):
     import json
     c = tmp_path / "c.jsonl"

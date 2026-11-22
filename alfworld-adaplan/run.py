@@ -449,6 +449,27 @@ def interaction_lines(res) -> list[str]:
     return out
 
 
+def reward_lines(rres) -> list[str]:
+    """합성 과제용: 푼 비율(보상)의 전략별 평균과, 같은 (과제, 회차)끼리의 차이(기준 M3·M1 대비)를 과제 부트스트랩 95%로 출력."""
+    out = ["푼 비율(평균보상) 비교 (과제 단위 부트스트랩 95%)"]
+    for sid, d in rres.items():
+        if not d:
+            continue
+        line = f"  {sid:<26}평균 {sum(d.values()) / len(d):.3f} (에피소드 {len(d)})"
+        for ref in ("adaplan_M3", "adaplan_M1"):
+            if ref == sid or not rres.get(ref):
+                continue
+            keys = sorted(set(d) & set(rres[ref]))
+            diffs = defaultdict(list)
+            for t, rep in keys:
+                diffs[t].append(d[(t, rep)] - rres[ref][(t, rep)])
+            if len(diffs) >= 5:
+                m, lo, hi = task_boot(diffs)
+                line += f"   vs {ref[8:]} {m:+.3f} [{lo:+.3f}, {hi:+.3f}]"
+        out.append(line)
+    return out
+
+
 def ablate(args) -> None:
     """API 호출 없이 캐시에서 모든 전략을 기준(adaplan_M3)·ADaPT와 과제 단위로 비교한다."""
     cache, _ = load_cache(args.cache)
@@ -460,12 +481,14 @@ def ablate(args) -> None:
     res = {s.sid: {} for s in arms}
     cost = {s.sid: 0.0 for s in arms}
     rew = {s.sid: 0.0 for s in arms}
+    rres = {s.sid: {} for s in arms}                 # 합성 과제용: 푼 비율(보상)의 에피소드별 값
     ok_type = (lambda tt: True) if getattr(args, "chain", 0) else type_filter(args)      # chain이면 유형은 합성 안에서 이미 적용됨
     for (sid, t, rep, sig), r in cache.items():
         if sig in sigs and sigs[sig].sid == sid and ok_type(r.get("ttype")):
             res[sid][(t, rep)] = int(r["success"])
             cost[sid] += r.get("cost_usd", 0.0)
             rew[sid] += r.get("reward", 0.0)
+            rres[sid][(t, rep)] = float(r.get("reward", 0.0))
     done = [k for v in res.values() for k in v]
     if done:
         args.n, args.reps = len({t for t, _ in done}), max(rep for _, rep in done) + 1     # 결과 파일 이름용
@@ -492,6 +515,8 @@ def ablate(args) -> None:
         n_ok = sum(rs.values())
         per_ok = f"{cost[s.sid] / n_ok:>9.4f}" if n_ok else f"{'-':>9}"
         lines.append(f"{s.sid:<26}{len(rs):>8}{rate:>8.0%}{cost[s.sid] / len(rs):>11.4f}{per_ok}{rew[s.sid] / len(rs):>9.2f}   {base:<38}{adp:<38}{m1}")
+    if getattr(args, "chain", 0):
+        lines += [""] + reward_lines(rres)
     if getattr(args, "interaction", False):
         lines += [""] + interaction_lines(res)
     text = "\n".join(lines) + "\n"
