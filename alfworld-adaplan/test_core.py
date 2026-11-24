@@ -516,3 +516,12 @@ def test_hintonly_arm_no_refine_hint_in_act_prompt():
     assert ho.key() != Strategy(sid="x", start_level=1, max_level=1, trigger_n=3, max_expand=4, scope="local").key()
     nh1 = next(s for s in run.EXTRA if s.sid == "adaplan_M1_adapt_nohint")
     assert nh1.key()[-1] == "nohint" and ho.key()[-1] == "hintonly"
+
+
+def test_strategies_for_skip_base():
+    a = SimpleNamespace(cmd="compare", skip_adapt=True, skip_base=True, arms="adaplan_M1,adaplan_M1_adapt")
+    assert [x.sid for x in run.strategies_for(a)] == ["adaplan_M1", "adaplan_M1_adapt"]
+    a = SimpleNamespace(cmd="compare", skip_adapt=True, skip_base=False, arms="adaplan_M1")
+    assert [x.sid for x in run.strategies_for(a)] == ["adaplan_M3", "adaplan_M1"]
+    a = SimpleNamespace(cmd="compare", arms=None)           # 기본 동작은 그대로: 기준 + ADaPT
+    assert [x.sid for x in run.strategies_for(a)] == ["adaplan_M3", "adaplan_M3_adapt"]

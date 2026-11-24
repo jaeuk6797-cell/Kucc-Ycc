@@ -413,6 +413,14 @@ def save_report(args, text: str, extra: str = "") -> str | None:
     return path
 
 
+def strategies_for(args) -> list:
+    """이번 실행에서 돌릴 전략 목록. --skip-base면 M3 기준도 건너뛴다(--arms로 고른 전략만, 비용 절약)."""
+    if args.cmd == "pilot":
+        return [BASELINE]
+    base = [] if getattr(args, "skip_base", False) else [BASELINE]
+    return base + ([] if getattr(args, "skip_adapt", False) else [ADAPT]) + extra_arms(args)
+
+
 def extra_arms(args) -> list:
     if not args.arms:
         return []
@@ -671,6 +679,7 @@ def main() -> None:
     ap.add_argument("--arms", default=None,
                     help="compare/ablate: 추가로 돌릴 전략 이름(쉼표). 예: adaplan_M1,adaplan_M2. 'all'이면 비교군 전부")
     ap.add_argument("--skip-adapt", action="store_true", help="compare: 기본 ADaPT 전략은 건너뜀(--arms로 지정한 전략과 기준만 실행, 비용 절약)")
+    ap.add_argument("--skip-base", action="store_true", help="compare: M3 기준(adaplan_M3)도 건너뜀. --skip-adapt와 함께 --arms로 고른 전략만 실행(비용 절약)")
     ap.add_argument("--planner-model", default=None,
                     help="계획·분해 호출만 이 모델로 보냄(OpenAI 호환 서버). 예: llama3.1:8b. 행동 호출은 --model")
     ap.add_argument("--planner-base-url", default=None, help="예: http://localhost:11434/v1 (Ollama)")
@@ -734,8 +743,7 @@ def main() -> None:
         print(f"[선택] 수납장 수 상위 {args.hard_frac:.0%} → 후보 {len(pool)}개 (속성표 {args.features})")
     tasks = pick_tasks(env.num_games, args.n, args.seed, pool)
     ttypes = {t: env.task_type(t) for t in tasks}
-    strategies = [BASELINE] if args.cmd == "pilot" else \
-        [BASELINE] + ([] if getattr(args, "skip_adapt", False) else [ADAPT]) + extra_arms(args)
+    strategies = strategies_for(args)
     res: dict[str, dict[tuple[int, int], Trial]] = {s.sid: {} for s in strategies}
     total, done_n, failed, t_start = len(tasks) * args.reps * len(strategies), 0, [], time.time()
     if spent:
