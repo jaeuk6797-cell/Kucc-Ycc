@@ -17,7 +17,8 @@
 ### 2026-11-25 (55) 분석 코드와 출력 텍스트 저장소에 추가 (사용자 요청: "활용 코드랑 데이터 텍스트로", "깃허브에 푸시")
 - 추가 파일: `adapt_analysis.py`(캐시 읽기 전용, API 비용 없음, 과제 단위 부트스트랩 20000회·McNemar, 집합별·합산·연속 5개 짝 비교), `adapt_analysis_output.txt`(위 코드를 메인 계량기 $19.7490 시점 캐시에서 실행한 출력, 항목 (49)~(54)의 짝 비교 숫자와 같음)
 - 실행: `ADAPLAN_OUT=/mnt/d/kucc ./alfenv/bin/python adapt_analysis.py` (alfworld-adaplan 폴더에서, 캐시 경로는 인자로 변경 가능)
-- 에피소드별 데이터(`episodes.csv`, 5691행, 약 0.5MB)와 `compare_*.md` 6개는 저장소에 넣지 않고 사용자 PC `C:\Users\jaeuk\Documents\adapt_export\`에 보관(계획·행동 기록 제외, API 키 없음)
+- 데이터도 저장소에 추가(사용자 요청 "코드나 데이터 전부 푸시", 커밋 50c910f): `data/`(`episodes.csv` 5691행, `results_cache.jsonl.gz` 원본 캐시 약 2.8MB, `results_cache_archive.jsonl.gz`, `cost_calls.jsonl.gz`, README), `analysis_scripts/`(작업 중 쓴 개별 스크립트 13개), `results/compare_20261125_*.md` 6개. 푸시 전 파일 전체에서 API 키 패턴 검색 결과 0건. 푸시는 PC의 WSL에 GitHub 인증이 없어 Windows Git(저장된 인증)으로 새 clone에서 수행(사용자의 작업 저장소 `~/Kucc-Ycc`는 변경하지 않음)
+- 사용자 PC 사본: `C:\Users\jaeuk\Documents\adapt_export\`
 - 참고(출력에서 직접 읽은 사실): `seen`의 M2 28개는 초기 파일럿이라 M1 대비 비교(−10.7%p [−28.6, +7.1])는 의미가 약함
 
 ### 2026-11-25 (54) 연속 5개 합성 과제에서 ADaPT 3종 vs M1 (unseen 합성 26개 × 2회, 스텝 100, 5개 모두 성공 기준, 사용자가 붙여넣은 `compare` 출력과 같은 캐시에서 제가 계산한 짝 비교 기준)
