@@ -14,6 +14,12 @@
 
 ## 1. 진행 기록 (최신 순)
 
+### 2026-11-25 (55) 분석 코드와 출력 텍스트 저장소에 추가 (사용자 요청: "활용 코드랑 데이터 텍스트로", "깃허브에 푸시")
+- 추가 파일: `adapt_analysis.py`(캐시 읽기 전용, API 비용 없음, 과제 단위 부트스트랩 20000회·McNemar, 집합별·합산·연속 5개 짝 비교), `adapt_analysis_output.txt`(위 코드를 메인 계량기 $19.7490 시점 캐시에서 실행한 출력, 항목 (49)~(54)의 짝 비교 숫자와 같음)
+- 실행: `ADAPLAN_OUT=/mnt/d/kucc ./alfenv/bin/python adapt_analysis.py` (alfworld-adaplan 폴더에서, 캐시 경로는 인자로 변경 가능)
+- 에피소드별 데이터(`episodes.csv`, 5691행, 약 0.5MB)와 `compare_*.md` 6개는 저장소에 넣지 않고 사용자 PC `C:\Users\jaeuk\Documents\adapt_export\`에 보관(계획·행동 기록 제외, API 키 없음)
+- 참고(출력에서 직접 읽은 사실): `seen`의 M2 28개는 초기 파일럿이라 M1 대비 비교(−10.7%p [−28.6, +7.1])는 의미가 약함
+
 ### 2026-11-25 (54) 연속 5개 합성 과제에서 ADaPT 3종 vs M1 (unseen 합성 26개 × 2회, 스텝 100, 5개 모두 성공 기준, 사용자가 붙여넣은 `compare` 출력과 같은 캐시에서 제가 계산한 짝 비교 기준)
 - 설정: 사용자 요청 "5개 연결에서 돌려봐". `compare --chain 5 --max-steps 100 --n 26 --reps 2 --arms adaplan_M1,adaplan_M1_adapt,adaplan_M1_adapt_nohint,adaplan_M1_hintonly --skip-base --skip-adapt --workers 3 --stop-frac 0.8`. M1의 1회차 26개는 항목 (36) 캐시 재사용(출력의 `[n/208 캐시]` 줄로 확인), 나머지 신규
 - 결과(출력 그대로, 합성 26 × 2회 = 52 에피소드/전략)
